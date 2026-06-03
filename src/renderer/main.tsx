@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { ChevronDown, Eye, Layers, LocateFixed, Menu, Minus, Plus, Power, RefreshCw, RotateCcw, Save, Send, Trash2, Undo2, X } from 'lucide-react';
-import type { DetectedWindow, DockApp, LayoutTemplate, RestoreResult, WindowCommand } from '../shared/types';
+import { Box, ChevronDown, Eye, Layers, LocateFixed, Menu, Minus, Plus, Power, RefreshCw, RotateCcw, Save, Send, Trash2, Undo2, X } from 'lucide-react';
+import type { DetectedWindow, DockApp, DwmPreviewWindow, LayoutTemplate, MoveEmbeddedWindowParams, RestoreResult, WindowCommand } from '../shared/types';
 import { createRegionFromTemplate, getWindowIdentity, getWindowsForRegion, updateRegionMembership } from './canvas/regions';
 import { createInitialVirtualLayout, toVirtualWindow } from './canvas/windows';
 import type { TemplateRegion, VirtualWindowState } from './canvas/types';
@@ -52,6 +52,9 @@ function App(): React.JSX.Element {
   const [launchingAppId, setLaunchingAppId] = useState<string | null>(null);
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
   const [liveControlEnabled, setLiveControlEnabled] = useState(false);
+  const [overlayModeEnabled, setOverlayModeEnabled] = useState(false);
+  const [experimentalEmbedEnabled, setExperimentalEmbedEnabled] = useState(false);
+  const [embeddedWindowIds, setEmbeddedWindowIds] = useState<string[]>([]);
 
   const canvasLabel = previewTemplate
     ? `Previewing template: ${previewTemplate.name}`
@@ -331,6 +334,91 @@ function App(): React.JSX.Element {
     }
   }
 
+  async function embedRealWindow(windowInfo: VirtualWindowState, bounds: MoveEmbeddedWindowParams): Promise<void> {
+    if (!windowInfo.hwnd) {
+      return;
+    }
+
+    setError(null);
+    try {
+      const result = await window.infiniteDesk.embedWindowToHost({
+        hwnd: windowInfo.hwnd,
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height
+      });
+
+      if (!result.success) {
+        setError(result.error || `Could not embed ${windowInfo.title}.`);
+        return;
+      }
+
+      setEmbeddedWindowIds((current) => (current.includes(windowInfo.hwnd!) ? current : [...current, windowInfo.hwnd!]));
+      setMessage(`Embedded "${windowInfo.title}" into its process node.`);
+    } catch (embedError) {
+      setError((embedError as Error).message);
+    }
+  }
+
+  async function detachRealWindow(hwnd: string): Promise<void> {
+    setError(null);
+    try {
+      const result = await window.infiniteDesk.detachEmbeddedWindow(hwnd);
+      if (!result.success) {
+        setError(result.error || 'Could not detach embedded window.');
+        return;
+      }
+
+      setEmbeddedWindowIds((current) => current.filter((item) => item !== hwnd));
+      setMessage('Detached embedded window.');
+    } catch (detachError) {
+      setError((detachError as Error).message);
+    }
+  }
+
+  async function moveEmbeddedWindow(params: MoveEmbeddedWindowParams): Promise<void> {
+    try {
+      await window.infiniteDesk.moveEmbeddedWindow(params);
+    } catch {
+      // Embedded movement is best-effort during drag and zoom; explicit detach still reports errors.
+    }
+  }
+
+  async function syncDwmPreviews(previews: DwmPreviewWindow[]): Promise<void> {
+    try {
+      await window.infiniteDesk.syncDwmPreviews(previews);
+    } catch {
+      // DWM previews are best-effort visual overlays. Window control still works without them.
+    }
+  }
+
+  async function clearDwmPreviews(): Promise<void> {
+    try {
+      await window.infiniteDesk.clearDwmPreviews();
+    } catch {
+      // Ignore cleanup errors; the host is also stopped by the main process on quit.
+    }
+  }
+
+  function toggleExperimentalEmbedMode(): void {
+    if (experimentalEmbedEnabled) {
+      setExperimentalEmbedEnabled(false);
+      setMessage('Experimental Embed Mode disabled. Existing embedded windows can still be detached from their nodes.');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      'Experimental Embed Mode uses Win32 SetParent to attach external app windows into InfiniteDesk. Some apps can behave incorrectly. Continue?'
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setExperimentalEmbedEnabled(true);
+    setMessage('Experimental Embed Mode enabled. Use Embed on a process node to test real app content inside it.');
+  }
+
   function toggleLiveControl(): void {
     if (liveControlEnabled) {
       setLiveControlEnabled(false);
@@ -345,6 +433,40 @@ function App(): React.JSX.Element {
 
     setLiveControlEnabled(true);
     setMessage('Live Control enabled. Dragging frames moves real windows immediately.');
+  }
+
+  async function toggleOverlayMode(): Promise<void> {
+    const nextEnabled = !overlayModeEnabled;
+
+    if (nextEnabled) {
+      const confirmed = window.confirm(
+        'Native Overlay keeps InfiniteDesk above real windows and enables Live Control. Dragging frames will move real Windows windows immediately.'
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
+
+    setError(null);
+    try {
+      const result = await window.infiniteDesk.setOverlayMode(nextEnabled);
+      if (!result.success) {
+        setError(result.error || 'Could not change Native Overlay mode.');
+        return;
+      }
+
+      setOverlayModeEnabled(result.enabled);
+      setLiveControlEnabled(result.enabled);
+      setMessage(
+        result.enabled
+          ? 'Native Overlay enabled. InfiniteDesk is now a live control layer over real windows.'
+          : 'Native Overlay disabled. InfiniteDesk returned to normal controller mode.'
+      );
+    } catch (overlayError) {
+      setError((overlayError as Error).message);
+    } finally {
+      setIsBrandMenuOpen(false);
+    }
   }
 
   async function restoreTemplate(template: LayoutTemplate): Promise<void> {
@@ -409,27 +531,37 @@ function App(): React.JSX.Element {
       } else if (event.key === '0') {
         event.preventDefault();
         setFitSignal((value) => value + 1);
+      } else if (event.shiftKey && event.key.toLowerCase() === 'o') {
+        event.preventDefault();
+        void toggleOverlayMode();
       }
     }
 
     window.addEventListener('keydown', handleShortcuts);
     return () => window.removeEventListener('keydown', handleShortcuts);
-  }, [virtualWindows, regions]);
+  }, [virtualWindows, regions, overlayModeEnabled, liveControlEnabled]);
 
   return (
-    <main className="immersive-shell">
+    <main className={`immersive-shell ${overlayModeEnabled ? 'overlay-mode' : ''}`}>
       <CanvasPreview
         windows={virtualWindows}
         regions={regions}
         previewLabel={canvasLabel}
         selectedRegionId={selectedRegionId}
         liveControlEnabled={liveControlEnabled}
+        experimentalEmbedEnabled={experimentalEmbedEnabled}
+        embeddedWindowIds={embeddedWindowIds}
         onWindowsChange={setVirtualWindows}
         onRegionsChange={setRegions}
         onSelectRegion={setSelectedRegionId}
         onLiveMoveWindow={(windowInfo) => void moveLiveWindow(windowInfo)}
         onWorkWindow={(hwnd) => void workInRealWindow(hwnd)}
         onWindowCommand={(hwnd, command) => void controlRealWindow(hwnd, command)}
+        onEmbedWindow={(windowInfo, bounds) => void embedRealWindow(windowInfo, bounds)}
+        onDetachEmbeddedWindow={(hwnd) => void detachRealWindow(hwnd)}
+        onMoveEmbeddedWindow={(params) => void moveEmbeddedWindow(params)}
+        onSyncDwmPreviews={(previews) => void syncDwmPreviews(previews)}
+        onClearDwmPreviews={() => void clearDwmPreviews()}
         onScanWindows={() => void scanWindows()}
         onSaveRegions={() => void saveRegions()}
         onApplyWindows={(targetWindows) => void applyWindows(targetWindows)}
@@ -469,6 +601,14 @@ function App(): React.JSX.Element {
               <Power size={15} />
               Live Control {liveControlEnabled ? 'Off' : 'On'}
             </button>
+            <button onClick={() => void toggleOverlayMode()}>
+              <LocateFixed size={15} />
+              Native Overlay {overlayModeEnabled ? 'Off' : 'On'}
+            </button>
+            <button onClick={toggleExperimentalEmbedMode}>
+              <Box size={15} />
+              Experimental Embed {experimentalEmbedEnabled ? 'Off' : 'On'}
+            </button>
             <button onClick={() => setIsDrawerOpen(true)}>
               <Menu size={15} />
               Details
@@ -494,6 +634,16 @@ function App(): React.JSX.Element {
         Live Control: {liveControlEnabled ? 'On' : 'Off'}
       </button>
 
+      <button className={`overlay-mode-pill ${overlayModeEnabled ? 'enabled' : ''}`} onClick={() => void toggleOverlayMode()}>
+        <LocateFixed size={14} />
+        Native Overlay: {overlayModeEnabled ? 'On' : 'Off'}
+      </button>
+
+      <button className={`experimental-embed-pill ${experimentalEmbedEnabled ? 'enabled' : ''}`} onClick={toggleExperimentalEmbedMode}>
+        <Box size={14} />
+        Experimental Embed: {experimentalEmbedEnabled ? 'On' : 'Off'}
+      </button>
+
       <button className="floating-help-button" onClick={() => setIsDrawerOpen(true)} title="Show shortcuts and workflow help">
         ?
       </button>
@@ -514,8 +664,16 @@ function App(): React.JSX.Element {
           <p>
             Live Control is {liveControlEnabled ? 'On: dragging frames moves real windows immediately.' : 'Off: dragging is virtual until Apply Layout.'}
           </p>
+          <p>
+            Native Overlay is {overlayModeEnabled ? 'On: InfiniteDesk is layered over real windows.' : 'Off: InfiniteDesk is a normal controller window.'}
+          </p>
+          <p>
+            Experimental Embed is {experimentalEmbedEnabled ? `On: ${embeddedWindowIds.length} windows embedded.` : 'Off: external windows are not reparented.'}
+          </p>
           <div className="shortcut-list">
             <strong>Workflow</strong>
+            <span>Native Overlay + Live Control is the main path for controlling real Windows windows.</span>
+            <span>Experimental Embed attempts to place real app windows inside process nodes with Win32 SetParent.</span>
             <span>Select a region, then launch apps from the Dock to place them there.</span>
             <span>Ctrl+Drag on empty canvas creates a Template Region.</span>
             <span>Drag a region to move its assigned windows together.</span>
@@ -527,6 +685,7 @@ function App(): React.JSX.Element {
             <span>Ctrl+S Save Regions</span>
             <span>Ctrl+Enter Apply Layout</span>
             <span>Ctrl+0 Fit View</span>
+            <span>Ctrl+Shift+O Native Overlay</span>
             <span>Esc Close overlays</span>
           </div>
         </section>

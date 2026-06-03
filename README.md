@@ -1,40 +1,49 @@
 # InfiniteDesk
 
-InfiniteDesk is a Windows desktop controller for organizing real application windows on a spatial canvas.
+InfiniteDesk is a Windows desktop controller that lets you view, arrange, save, and restore real application windows on a spatial canvas.
 
-It scans visible top-level Windows application windows, represents them as movable frames on an infinite canvas, saves layout regions as templates, and can apply those layouts back to the real OS windows.
+It does not replace Windows Explorer or act as a shell. Real applications remain real OS windows. InfiniteDesk scans those windows by HWND, renders them as process nodes, shows live DWM previews where possible, and sends Win32 commands when the user chooses to move, focus, or apply a layout.
 
-## Current MVP
+![InfiniteDesk workspace screenshot](docs/assets/workspace-screenshot.png)
 
-- Electron + React + TypeScript + Vite desktop app
-- Windows window scanning through PowerShell and Win32 APIs
-- Unicode-safe title scanning for Korean and other non-ASCII window titles
-- Detection of HWND, title, process name, bounds, minimized state, and restorable state
-- Minimized or invalid-bounds windows are protected from unsafe template saves
-- InfiniteDesk internal Electron windows are excluded from managed targets
-- Full-screen dark infinite canvas UI
-- Virtual window frames with drag-based layout editing
-- Template Regions created with Ctrl + drag
-- Region membership based on window center-point containment
-- Region dragging that moves assigned windows together
-- Region saving, template preview, delete, and restore
-- Apply Layout to move and resize real Windows application windows
-- Live Control mode for immediate real window movement while dragging
-- Window frame controls for focus, minimize, maximize, restore, close, and Work
-- Dock launcher for default pinned Windows applications
+## What Works Now
 
-## Live Control And Work Mode
+- Scan visible top-level Windows application windows.
+- Read HWND, title, process name, bounds, minimized state, and restorable state.
+- Display process nodes on a dark infinite canvas.
+- Show live DWM thumbnail previews inside process nodes.
+- Pan, zoom, reset, and fit the canvas camera.
+- Drag process nodes to edit virtual layout positions.
+- Create Template Regions with Ctrl + drag.
+- Assign windows to regions by moving their center point into a region.
+- Save regions as layout templates.
+- Restore saved templates.
+- Apply the current canvas layout to real Windows windows.
+- Focus, minimize, maximize, restore, close, and Work in a real window.
+- Launch default pinned apps from the bottom Dock.
+- Use Live Control mode to move real windows immediately while dragging.
+- Use Native Overlay mode as a translucent control layer over the desktop.
+- Experimentally reparent real windows into InfiniteDesk nodes with Win32 `SetParent`.
 
-InfiniteDesk does not embed Chrome, VS Code, or other app content inside React.
+## Design Direction
 
-Instead, it controls the real Windows application windows by HWND:
+InfiniteDesk is moving toward a Native Overlay + Live Window Control model.
 
-- Dragging a frame in Live Control mode moves the real window.
-- Clicking Focus brings the real window forward when Windows allows it.
-- Clicking Work focuses the real window and minimizes InfiniteDesk so the user can work inside the actual app.
-- Apply Layout moves all current canvas windows to their virtual positions.
+The main workflow is:
 
-This keeps applications real and interactive while InfiniteDesk acts as the spatial controller.
+1. InfiniteDesk gives a spatial overview of running processes.
+2. DWM thumbnails provide live visual previews inside canvas nodes.
+3. Real interaction still happens in the actual Windows application.
+4. InfiniteDesk controls those windows through HWND-based Win32 commands.
+
+DWM thumbnails are useful for overview, but they are not a direct input surface. Experimental reparenting can make a real application appear inside a node, but it is not stable enough to be the default direction.
+
+## Requirements
+
+- Windows 10 or Windows 11
+- Node.js 20 or newer recommended
+- npm
+- PowerShell 5.1, included with Windows
 
 ## Getting Started
 
@@ -50,7 +59,7 @@ Run the app in development:
 npm run dev
 ```
 
-Run validation:
+Validate the project:
 
 ```bash
 npm run typecheck
@@ -61,13 +70,14 @@ npm audit
 ## Usage
 
 1. Start InfiniteDesk.
-2. Scan Windows from the floating InfiniteDesk menu or press Ctrl+R.
-3. Drag window frames to arrange a virtual layout.
-4. Ctrl + drag on empty canvas to create a Template Region.
-5. Drag windows into regions to assign them.
-6. Save Regions to persist region templates.
-7. Use Apply Layout to move real Windows windows to the current canvas layout.
-8. Use Work on a frame to switch from InfiniteDesk into the real application window.
+2. Use the floating `InfiniteDesk` menu or press Ctrl+R to scan windows.
+3. Pan or zoom the canvas to inspect running processes.
+4. Drag process nodes to arrange a virtual layout.
+5. Ctrl + drag on empty canvas to create a Template Region.
+6. Drag process nodes into a region to assign them.
+7. Click `Save Regions` to persist region templates.
+8. Click `Apply Layout` to move real Windows windows to the current virtual layout.
+9. Click `Work` on a node to focus the real app and minimize InfiniteDesk.
 
 ## Keyboard Shortcuts
 
@@ -75,64 +85,71 @@ npm audit
 - Ctrl+S: Save Regions
 - Ctrl+Enter: Apply Layout
 - Ctrl+0: Fit View
-- Esc: Close overlays
+- Ctrl+Shift+O: Toggle Native Overlay
+- Esc: Close floating menus and drawers
 
 ## Architecture
 
 ```text
 React Renderer
   |
-  | preload IPC bridge
+  | context-isolated preload API
   v
 Electron Main Process
   |
-  | PowerShell script execution
-  v
-Win32 APIs
+  +-- PowerShell Win32 scanner/control script
+  |     |
+  |     +-- EnumWindows / GetWindowText / GetWindowRect
+  |     +-- MoveWindow / SetWindowPos
+  |     +-- ShowWindow / SetForegroundWindow
+  |     +-- SetParent / GetParent for experimental embed mode
   |
-  +-- EnumWindows / GetWindowText / GetWindowRect
-  +-- MoveWindow
-  +-- ShowWindow
-  +-- SetForegroundWindow / BringWindowToTop
-  +-- PostMessage(WM_CLOSE)
+  +-- DWM preview host process
+        |
+        +-- DwmRegisterThumbnail
+        +-- DwmUpdateThumbnailProperties
 ```
 
-Templates are stored in Electron `userData` as `templates.json`.
+Templates are stored in Electron `userData/templates.json`.
 
 ## Project Structure
 
 ```text
 src/
   main/
-    index.ts        Electron main process and IPC handlers
-    windows.ps1     Win32 scanning and window control script
+    index.ts              Electron main process and IPC handlers
+    windows.ps1           Win32 scanning and window control script
+    dwm-preview-host.ps1  DWM live preview host
   preload/
-    index.ts        Safe renderer IPC API
+    index.ts              Safe renderer IPC bridge
   renderer/
-    main.tsx        React app shell
-    styles.css      Canvas and control styling
-    canvas/         Coordinate, layout, and region helpers
-    components/     Canvas and Dock components
-    dock/           Default Dock app definitions
+    main.tsx              React app shell
+    styles.css            Canvas, dock, drawer, and control styling
+    canvas/               Coordinate, layout, and region helpers
+    components/           Canvas and Dock components
+    dock/                 Default Dock app definitions
   shared/
-    types.ts        Shared IPC and domain types
+    types.ts              Shared IPC and domain types
+docs/
+  assets/
+    workspace-screenshot.png
 ```
 
 ## Current Limitations
 
-- App content is not embedded inside the canvas.
-- Real-time window thumbnails are not implemented.
-- DWM thumbnail integration is not implemented.
-- Multi-monitor behavior is not specially modeled yet.
-- Focus commands can be limited by Windows foreground restrictions.
-- Elevated/admin windows may reject control from a non-elevated InfiniteDesk process.
-- Dock apps are defined in code; installed app discovery is not implemented yet.
+- DWM previews are visual only. They do not directly forward mouse or keyboard input.
+- Experimental embed mode can behave differently across apps and should be treated as unstable.
+- Chrome, Edge, VS Code, Electron apps, and elevated/admin windows may reject or behave oddly under native control.
+- Focus commands are limited by Windows foreground restrictions.
+- Multi-monitor layout persistence is not deeply modeled yet.
+- Dock apps are currently defined in code instead of discovered from the Start Menu.
+- DWM previews are hosted as overlay windows, so screenshot tools and z-order behavior can vary by environment.
 
-## Next Direction
+## Next Steps
 
-The next major step is to choose a deeper live-desktop strategy:
-
-- DWM thumbnails for live visual previews
-- Overlay/controller mode with better recall behavior
-- Optional native helper for stronger foreground and elevated-window control
-- Region-level apply and launch workflows
+- Harden Native Overlay recall and click-through behavior.
+- Add region-level apply and launch actions.
+- Add persistent Dock app editing.
+- Improve multi-monitor layout handling.
+- Replace PowerShell hot paths with a native helper for smoother live movement.
+- Keep DWM previews for overview while preserving real-window control as the main interaction model.

@@ -4,8 +4,10 @@ export type CanvasTransform = {
   scale: number;
 };
 
-export const MIN_CANVAS_SCALE = 0.2;
+export const MIN_CANVAS_SCALE = 0.01;
 export const MAX_CANVAS_SCALE = 2.5;
+const DEFAULT_CANVAS_SCALE = 0.2;
+const MAX_FIT_SCALE = 0.25;
 
 export function clampScale(scale: number): number {
   return Math.min(MAX_CANVAS_SCALE, Math.max(MIN_CANVAS_SCALE, scale));
@@ -29,11 +31,11 @@ export function fitViewToBounds(
   bounds: { x: number; y: number; width: number; height: number },
   containerWidth: number,
   containerHeight: number,
-  padding = 80
+  padding = 240
 ): CanvasTransform {
   const availableWidth = Math.max(1, containerWidth - padding * 2);
   const availableHeight = Math.max(1, containerHeight - padding * 2);
-  const nextScale = clampScale(Math.min(availableWidth / Math.max(1, bounds.width), availableHeight / Math.max(1, bounds.height), 1.25));
+  const nextScale = clampScale(Math.min(availableWidth / Math.max(1, bounds.width), availableHeight / Math.max(1, bounds.height), MAX_FIT_SCALE));
 
   return {
     scale: nextScale,
@@ -51,7 +53,7 @@ export function fitViewToWindows(
     return {
       offsetX: 120,
       offsetY: 96,
-      scale: 1
+      scale: DEFAULT_CANVAS_SCALE
     };
   }
 

@@ -3,7 +3,7 @@ import { Focus, Maximize2, Minimize2, RotateCcw, X } from 'lucide-react';
 import { fitViewToWindows, clampScale, screenToWorld, worldToScreen, type CanvasTransform } from '../canvas/transform';
 import { getWindowIdentity, updateRegionMembership } from '../canvas/regions';
 import { getVirtualWindowBounds } from '../canvas/windows';
-import type { WindowCommand } from '../../shared/types';
+import type { DwmPreviewWindow, MoveEmbeddedWindowParams, WindowCommand } from '../../shared/types';
 import type { TemplateRegion, VirtualWindowState } from '../canvas/types';
 
 type CanvasPreviewProps = {
@@ -12,12 +12,19 @@ type CanvasPreviewProps = {
   previewLabel: string;
   selectedRegionId: string | null;
   liveControlEnabled: boolean;
+  experimentalEmbedEnabled: boolean;
+  embeddedWindowIds: string[];
   onWindowsChange: (windows: VirtualWindowState[]) => void;
   onRegionsChange: (regions: TemplateRegion[]) => void;
   onSelectRegion: (regionId: string | null) => void;
   onLiveMoveWindow: (windowInfo: VirtualWindowState) => void;
   onWorkWindow: (hwnd: string) => void;
   onWindowCommand: (hwnd: string, command: WindowCommand) => void;
+  onEmbedWindow: (windowInfo: VirtualWindowState, bounds: MoveEmbeddedWindowParams) => void;
+  onDetachEmbeddedWindow: (hwnd: string) => void;
+  onMoveEmbeddedWindow: (params: MoveEmbeddedWindowParams) => void;
+  onSyncDwmPreviews: (previews: DwmPreviewWindow[]) => void;
+  onClearDwmPreviews: () => void;
   onScanWindows: () => void;
   onSaveRegions: () => void;
   onApplyWindows: (windows: VirtualWindowState[]) => void;
@@ -32,7 +39,7 @@ type CanvasPreviewProps = {
 const DEFAULT_TRANSFORM: CanvasTransform = {
   offsetX: 120,
   offsetY: 96,
-  scale: 1
+  scale: 0.2
 };
 const MIN_REGION_WIDTH = 200;
 const MIN_REGION_HEIGHT = 140;
@@ -40,6 +47,16 @@ const DEFAULT_REGION_WIDTH = 420;
 const DEFAULT_REGION_HEIGHT = 280;
 const REGION_COLORS = ['#2f7666', '#8a3f2f', '#6f5520', '#4d6793', '#7a5b8f'];
 const LIVE_MOVE_THROTTLE_MS = 40;
+const EMBEDDED_MOVE_THROTTLE_MS = 50;
+const EMBEDDED_NODE_CHROME_WIDTH = 16;
+const EMBEDDED_NODE_CHROME_HEIGHT = 54;
+const EMBEDDED_NODE_CONTENT_INSET_X = 8;
+const EMBEDDED_NODE_CONTENT_INSET_TOP = 46;
+const EMBEDDED_NODE_CONTENT_INSET_BOTTOM = 8;
+const NATIVE_EMBEDDED_VISIBLE_SCALE = 0.65;
+const HIDDEN_EMBEDDED_WINDOW_X = -30000;
+const HIDDEN_EMBEDDED_WINDOW_Y = -30000;
+const DWM_PREVIEW_SYNC_DELAY_MS = 50;
 
 type PanDrag = {
   type: 'pan';
@@ -171,12 +188,19 @@ export function CanvasPreview({
   previewLabel,
   selectedRegionId,
   liveControlEnabled,
+  experimentalEmbedEnabled,
+  embeddedWindowIds,
   onWindowsChange,
   onRegionsChange,
   onSelectRegion,
   onLiveMoveWindow,
   onWorkWindow,
   onWindowCommand,
+  onEmbedWindow,
+  onDetachEmbeddedWindow,
+  onMoveEmbeddedWindow,
+  onSyncDwmPreviews,
+  onClearDwmPreviews,
   onScanWindows,
   onSaveRegions,
   onApplyWindows,
@@ -192,11 +216,14 @@ export function CanvasPreview({
   const windowsRef = useRef(windows);
   const regionsRef = useRef(regions);
   const liveMoveRef = useRef<Record<string, { lastMoveAt: number; timeoutId: number | null }>>({});
+  const embeddedMoveRef = useRef<Record<string, { lastMoveAt: number; timeoutId: number | null; latest: MoveEmbeddedWindowParams | null }>>({});
   const [transform, setTransformState] = useState<CanvasTransform>(DEFAULT_TRANSFORM);
   const [dragMode, setDragMode] = useState<'none' | 'pan' | 'window' | 'region' | 'create-region'>('none');
   const [draftRegion, setDraftRegion] = useState<TemplateRegion | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [viewportVersion, setViewportVersion] = useState(0);
   const bounds = useMemo(() => getVirtualWindowBounds(windows), [windows]);
+  const embeddedWindowIdSet = useMemo(() => new Set(embeddedWindowIds), [embeddedWindowIds]);
 
   function setTransform(next: CanvasTransform | ((current: CanvasTransform) => CanvasTransform)): void {
     setTransformState((current) => {
@@ -224,6 +251,27 @@ export function CanvasPreview({
           window.clearTimeout(item.timeoutId);
         }
       });
+      Object.values(embeddedMoveRef.current).forEach((item) => {
+        if (item.timeoutId !== null) {
+          window.clearTimeout(item.timeoutId);
+        }
+      });
+    };
+  }, []);
+
+  useEffect(() => {
+    let animationFrameId = 0;
+    function handleResize(): void {
+      window.cancelAnimationFrame(animationFrameId);
+      animationFrameId = window.requestAnimationFrame(() => {
+        setViewportVersion((value) => value + 1);
+      });
+    }
+
+    window.addEventListener('resize', handleResize);
+    return () => {
+      window.cancelAnimationFrame(animationFrameId);
+      window.removeEventListener('resize', handleResize);
     };
   }, []);
 
@@ -267,6 +315,50 @@ export function CanvasPreview({
     };
   }
 
+  function scheduleEmbeddedMove(params: MoveEmbeddedWindowParams, immediate = false): void {
+    if (!params.hwnd || (!experimentalEmbedEnabled && !embeddedWindowIdSet.has(params.hwnd))) {
+      return;
+    }
+
+    const key = params.hwnd;
+    const now = window.performance.now();
+    const existing = embeddedMoveRef.current[key] || { lastMoveAt: 0, timeoutId: null, latest: null };
+    const elapsed = now - existing.lastMoveAt;
+
+    if (immediate || elapsed >= EMBEDDED_MOVE_THROTTLE_MS) {
+      if (existing.timeoutId !== null) {
+        window.clearTimeout(existing.timeoutId);
+      }
+      embeddedMoveRef.current[key] = {
+        lastMoveAt: now,
+        timeoutId: null,
+        latest: params
+      };
+      onMoveEmbeddedWindow(params);
+      return;
+    }
+
+    if (existing.timeoutId !== null) {
+      window.clearTimeout(existing.timeoutId);
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      const latest = embeddedMoveRef.current[key]?.latest || params;
+      embeddedMoveRef.current[key] = {
+        lastMoveAt: window.performance.now(),
+        timeoutId: null,
+        latest
+      };
+      onMoveEmbeddedWindow(latest);
+    }, EMBEDDED_MOVE_THROTTLE_MS - elapsed);
+
+    embeddedMoveRef.current[key] = {
+      ...existing,
+      timeoutId,
+      latest: params
+    };
+  }
+
   function fitView(): void {
     const canvas = canvasRef.current;
     if (!canvas) {
@@ -298,6 +390,110 @@ export function CanvasPreview({
     });
   }
 
+  function isEmbeddedWindow(windowInfo: VirtualWindowState, forceEmbedded = false): boolean {
+    return forceEmbedded || Boolean(windowInfo.hwnd && embeddedWindowIdSet.has(windowInfo.hwnd));
+  }
+
+  function shouldShowNativeEmbeddedWindow(windowInfo: VirtualWindowState, forceEmbedded = false): boolean {
+    return isEmbeddedWindow(windowInfo, forceEmbedded) && transform.scale >= NATIVE_EMBEDDED_VISIBLE_SCALE;
+  }
+
+  function getFrameScreenBounds(windowInfo: VirtualWindowState, forceEmbedded = false): { x: number; y: number; width: number; height: number } {
+    const position = worldToScreen(windowInfo.virtualX, windowInfo.virtualY, transform);
+    if (shouldShowNativeEmbeddedWindow(windowInfo, forceEmbedded)) {
+      const contentWidth = Math.max(1, windowInfo.width);
+      const contentHeight = Math.max(1, windowInfo.height);
+      return {
+        x: position.x,
+        y: position.y,
+        width: contentWidth + EMBEDDED_NODE_CHROME_WIDTH,
+        height: contentHeight + EMBEDDED_NODE_CHROME_HEIGHT
+      };
+    }
+
+    return {
+      x: position.x,
+      y: position.y,
+      width: Math.max(180, windowInfo.width * transform.scale),
+      height: Math.max(130, windowInfo.height * transform.scale)
+    };
+  }
+
+  function getEmbeddedContentBounds(windowInfo: VirtualWindowState, forceEmbedded = false): MoveEmbeddedWindowParams {
+    const frame = getFrameScreenBounds(windowInfo, forceEmbedded);
+    if (!shouldShowNativeEmbeddedWindow(windowInfo, forceEmbedded)) {
+      return {
+        hwnd: windowInfo.hwnd || '',
+        x: HIDDEN_EMBEDDED_WINDOW_X,
+        y: HIDDEN_EMBEDDED_WINDOW_Y,
+        width: Math.max(1, Math.round(windowInfo.width)),
+        height: Math.max(1, Math.round(windowInfo.height))
+      };
+    }
+
+    return {
+      hwnd: windowInfo.hwnd || '',
+      x: Math.round(frame.x + EMBEDDED_NODE_CONTENT_INSET_X),
+      y: Math.round(frame.y + EMBEDDED_NODE_CONTENT_INSET_TOP),
+      width: Math.max(1, Math.round(frame.width - EMBEDDED_NODE_CHROME_WIDTH)),
+      height: Math.max(1, Math.round(frame.height - EMBEDDED_NODE_CONTENT_INSET_TOP - EMBEDDED_NODE_CONTENT_INSET_BOTTOM))
+    };
+  }
+
+  function getDwmPreviewWindow(windowInfo: VirtualWindowState): DwmPreviewWindow | null {
+    if (!windowInfo.hwnd || shouldShowNativeEmbeddedWindow(windowInfo)) {
+      return null;
+    }
+
+    const frame = getFrameScreenBounds(windowInfo);
+    const canvas = canvasRef.current;
+    const canvasWidth = canvas?.clientWidth || 0;
+    const canvasHeight = canvas?.clientHeight || 0;
+    const titlebarHeight = 38;
+    const inset = 10;
+    const previewX = frame.x + inset;
+    const previewY = frame.y + titlebarHeight + inset;
+    const previewWidth = frame.width - inset * 2;
+    const previewHeight = frame.height - titlebarHeight - inset * 2;
+
+    if (previewWidth <= 20 || previewHeight <= 20) {
+      return null;
+    }
+
+    if (
+      canvasWidth > 0 &&
+      canvasHeight > 0 &&
+      (previewX < 0 || previewY < 0 || previewX + previewWidth > canvasWidth || previewY + previewHeight > canvasHeight)
+    ) {
+      return null;
+    }
+
+    return {
+      id: windowInfo.hwnd,
+      hwnd: windowInfo.hwnd,
+      x: Math.round(previewX),
+      y: Math.round(previewY),
+      width: Math.max(1, Math.round(previewWidth)),
+      height: Math.max(1, Math.round(previewHeight)),
+      visible: true,
+      opacity: 245
+    };
+  }
+
+  function flushEmbeddedWindowPositions(): void {
+    if (embeddedWindowIds.length === 0) {
+      return;
+    }
+
+    windowsRef.current.forEach((windowInfo) => {
+      if (!windowInfo.hwnd || !embeddedWindowIdSet.has(windowInfo.hwnd)) {
+        return;
+      }
+
+      scheduleEmbeddedMove(getEmbeddedContentBounds(windowInfo), true);
+    });
+  }
+
   useEffect(() => {
     fitView();
   }, [fitSignal]);
@@ -317,6 +513,35 @@ export function CanvasPreview({
       zoomBy(0.88);
     }
   }, [zoomOutSignal]);
+
+  useEffect(() => {
+    if (embeddedWindowIds.length === 0) {
+      return;
+    }
+
+    windows.forEach((windowInfo) => {
+      if (!windowInfo.hwnd || !embeddedWindowIdSet.has(windowInfo.hwnd)) {
+        return;
+      }
+
+      scheduleEmbeddedMove(getEmbeddedContentBounds(windowInfo));
+    });
+  }, [embeddedWindowIdSet, embeddedWindowIds.length, transform, windows]);
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      const previews = windows.map((windowInfo) => getDwmPreviewWindow(windowInfo)).filter((preview): preview is DwmPreviewWindow => preview !== null);
+      onSyncDwmPreviews(previews);
+    }, DWM_PREVIEW_SYNC_DELAY_MS);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [embeddedWindowIdSet, transform, viewportVersion, windows]);
+
+  useEffect(() => {
+    return () => {
+      onClearDwmPreviews();
+    };
+  }, []);
 
   useEffect(() => {
     function closeContextMenu(event: KeyboardEvent): void {
@@ -577,6 +802,7 @@ export function CanvasPreview({
       }
     } else if (drag?.type === 'window' || drag?.type === 'region') {
       onRegionsChange(updateRegionMembership(windowsRef.current, regionsRef.current));
+      flushEmbeddedWindowPositions();
     }
 
     if (drag?.type === 'window' && !drag.moved && liveControlEnabled) {
@@ -683,6 +909,22 @@ export function CanvasPreview({
     onWorkWindow(windowInfo.hwnd);
   }
 
+  function embedWindow(windowInfo: VirtualWindowState): void {
+    if (!windowInfo.hwnd) {
+      return;
+    }
+
+    onEmbedWindow(windowInfo, getEmbeddedContentBounds(windowInfo, true));
+  }
+
+  function detachEmbeddedWindow(windowInfo: VirtualWindowState): void {
+    if (!windowInfo.hwnd) {
+      return;
+    }
+
+    onDetachEmbeddedWindow(windowInfo.hwnd);
+  }
+
     const renderedRegions = draftRegion ? [...regions, normalizeDraftRegion(draftRegion)] : regions;
   const contextWindow =
     contextMenu?.type === 'window'
@@ -767,16 +1009,20 @@ export function CanvasPreview({
         ) : (
           windows.map((windowInfo, index) => {
             const key = getWindowKey(windowInfo, index);
-            const position = worldToScreen(windowInfo.virtualX, windowInfo.virtualY, transform);
+            const frame = getFrameScreenBounds(windowInfo);
+            const isEmbedded = isEmbeddedWindow(windowInfo);
+            const isNativeEmbeddedVisible = shouldShowNativeEmbeddedWindow(windowInfo);
             return (
               <article
-                className={`virtual-window ${windowInfo.isHelper ? 'helper-window' : ''} ${windowInfo.isDirty ? 'dirty-window' : ''}`}
+                className={`virtual-window ${windowInfo.isHelper ? 'helper-window' : ''} ${windowInfo.isDirty ? 'dirty-window' : ''} ${
+                  isEmbedded ? 'embedded-window' : ''
+                } ${isEmbedded && !isNativeEmbeddedVisible ? 'embedded-overview-window' : ''}`}
                 key={key}
                 style={{
-                  left: position.x,
-                  top: position.y,
-                  width: Math.max(180, windowInfo.width * transform.scale),
-                  height: Math.max(130, windowInfo.height * transform.scale)
+                  left: frame.x,
+                  top: frame.y,
+                  width: frame.width,
+                  height: frame.height
                 }}
                 onPointerDown={(event) => handleWindowPointerDown(event, windowInfo, key)}
                 onContextMenu={(event) => {
@@ -802,8 +1048,20 @@ export function CanvasPreview({
                   </div>
                   <div className="virtual-window-actions" onPointerDown={(event) => event.stopPropagation()}>
                     {windowInfo.isDirty ? <em>Edited</em> : null}
+                    {isEmbedded && !isNativeEmbeddedVisible ? <em>Overview</em> : null}
                     {windowInfo.hwnd ? (
                       <>
+                        {experimentalEmbedEnabled || isEmbedded ? (
+                          isEmbedded ? (
+                            <button className="embed-window-command" title="Detach embedded real window" onClick={() => detachEmbeddedWindow(windowInfo)}>
+                              Detach
+                            </button>
+                          ) : (
+                            <button className="embed-window-command" title="Embed real window into this node" onClick={() => embedWindow(windowInfo)}>
+                              Embed
+                            </button>
+                          )
+                        ) : null}
                         <button className="work-window-command" title="Work in real window" onClick={() => workInWindow(windowInfo)}>
                           Work
                         </button>
@@ -826,15 +1084,19 @@ export function CanvasPreview({
                     ) : null}
                   </div>
                 </div>
-                <div className="virtual-content">
-                  <WindowPlaceholder processName={windowInfo.processName} />
-                  <span>
-                    {windowInfo.width} x {windowInfo.height}
-                  </span>
-                  <span>
-                    {windowInfo.virtualX}, {windowInfo.virtualY}
-                  </span>
-                  {windowInfo.isHelper ? <b>Helper</b> : null}
+                <div className={`virtual-content ${isEmbedded && isNativeEmbeddedVisible ? 'embedded-content' : ''}`}>
+                  {isEmbedded && isNativeEmbeddedVisible ? null : (
+                    <>
+                      <WindowPlaceholder processName={windowInfo.processName} />
+                      <span>
+                        {windowInfo.width} x {windowInfo.height}
+                      </span>
+                      <span>
+                        {windowInfo.virtualX}, {windowInfo.virtualY}
+                      </span>
+                      {windowInfo.isHelper ? <b>Helper</b> : null}
+                    </>
+                  )}
                 </div>
               </article>
             );
@@ -861,6 +1123,13 @@ export function CanvasPreview({
               <>
                 {contextWindow.hwnd ? (
                   <>
+                    {experimentalEmbedEnabled || embeddedWindowIdSet.has(contextWindow.hwnd) ? (
+                      embeddedWindowIdSet.has(contextWindow.hwnd) ? (
+                        <button onClick={() => { setContextMenu(null); detachEmbeddedWindow(contextWindow); }}>Detach Embedded Window</button>
+                      ) : (
+                        <button onClick={() => { setContextMenu(null); embedWindow(contextWindow); }}>Embed Real Window</button>
+                      )
+                    ) : null}
                     <button onClick={() => { setContextMenu(null); workInWindow(contextWindow); }}>Work in Real Window</button>
                     <button onClick={() => { setContextMenu(null); runWindowCommand(contextWindow, 'focus'); }}>Focus Real Window</button>
                     <button onClick={() => { setContextMenu(null); runWindowCommand(contextWindow, 'minimize'); }}>Minimize Real Window</button>

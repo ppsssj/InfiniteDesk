@@ -4,10 +4,16 @@ import type {
   CreateTemplateInput,
   DetectedWindow,
   DockApp,
+  DwmPreviewResult,
+  DwmPreviewWindow,
+  EmbedResult,
+  EmbedWindowParams,
   FocusWindowResult,
   LaunchResult,
   LayoutTemplate,
+  MoveEmbeddedWindowParams,
   MoveWindowResult,
+  OverlayModeResult,
   RestoreResult,
   WindowCommand,
   WindowCommandResult
@@ -24,6 +30,12 @@ const api = {
   moveWindow: (windowInfo: DetectedWindow): Promise<MoveWindowResult> => ipcRenderer.invoke('window:move', windowInfo),
   focusWindow: (hwnd: string): Promise<FocusWindowResult> => ipcRenderer.invoke('window:focus', hwnd),
   workInWindow: (hwnd: string): Promise<FocusWindowResult> => ipcRenderer.invoke('window:work', hwnd),
+  setOverlayMode: (enabled: boolean): Promise<OverlayModeResult> => ipcRenderer.invoke('app:set-overlay-mode', enabled),
+  embedWindowToHost: (params: EmbedWindowParams): Promise<EmbedResult> => ipcRenderer.invoke('window:embed', params),
+  detachEmbeddedWindow: (hwnd: string): Promise<EmbedResult> => ipcRenderer.invoke('window:detach-embedded', hwnd),
+  moveEmbeddedWindow: (params: MoveEmbeddedWindowParams): Promise<EmbedResult> => ipcRenderer.invoke('window:move-embedded', params),
+  syncDwmPreviews: (previews: DwmPreviewWindow[]): Promise<DwmPreviewResult> => ipcRenderer.invoke('dwm:sync-previews', previews),
+  clearDwmPreviews: (): Promise<DwmPreviewResult> => ipcRenderer.invoke('dwm:clear-previews'),
   controlWindow: (hwnd: string, command: WindowCommand): Promise<WindowCommandResult> =>
     ipcRenderer.invoke('window:command', hwnd, command)
 };

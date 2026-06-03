@@ -66,6 +66,58 @@ export type WindowCommandResult = {
   error?: string;
 };
 
+export type OverlayModeResult = {
+  success: boolean;
+  enabled: boolean;
+  error?: string;
+};
+
+export type EmbedWindowParams = {
+  hwnd: string;
+  hostHwnd?: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type MoveEmbeddedWindowParams = {
+  hwnd: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type EmbedResult = {
+  success: boolean;
+  hwnd: string;
+  error?: string;
+  originalParentHwnd?: string;
+  originalStyle?: string;
+  originalExStyle?: string;
+  originalX?: number;
+  originalY?: number;
+  originalWidth?: number;
+  originalHeight?: number;
+};
+
+export type DwmPreviewWindow = {
+  id: string;
+  hwnd: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  visible: boolean;
+  opacity?: number;
+};
+
+export type DwmPreviewResult = {
+  success: boolean;
+  error?: string;
+};
+
 export type RestoreResult = {
   restored: number;
   skipped: number;
