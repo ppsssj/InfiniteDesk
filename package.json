@@ -1,0 +1,26 @@
+{
+  "name": "infinitedesk",
+  "version": "0.1.0",
+  "description": "Windows-based desktop layout templates for real application windows.",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "set ELECTRON_RUN_AS_NODE=&& electron-vite dev",
+    "build": "tsc --noEmit && electron-vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.5.0",
+    "electron-vite": "^3.1.0",
+    "lucide-react": "^0.511.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.29",
+    "@types/react": "^19.1.6",
+    "@types/react-dom": "^19.1.5",
+    "electron": "^39.8.5"
+  }
+}

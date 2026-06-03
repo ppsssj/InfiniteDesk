@@ -1,261 +1,138 @@
 # InfiniteDesk
 
-> A Windows-based infinite desktop environment that allows users to organize, navigate, and restore real application windows on an unlimited canvas.
+InfiniteDesk is a Windows desktop controller for organizing real application windows on a spatial canvas.
 
-## Overview
+It scans visible top-level Windows application windows, represents them as movable frames on an infinite canvas, saves layout regions as templates, and can apply those layouts back to the real OS windows.
 
-Modern operating systems are constrained by physical monitors and fixed desktop spaces.
+## Current MVP
 
-As users open more applications, windows become stacked, minimized, or hidden behind one another, making workspace management increasingly difficult.
+- Electron + React + TypeScript + Vite desktop app
+- Windows window scanning through PowerShell and Win32 APIs
+- Unicode-safe title scanning for Korean and other non-ASCII window titles
+- Detection of HWND, title, process name, bounds, minimized state, and restorable state
+- Minimized or invalid-bounds windows are protected from unsafe template saves
+- InfiniteDesk internal Electron windows are excluded from managed targets
+- Full-screen dark infinite canvas UI
+- Virtual window frames with drag-based layout editing
+- Template Regions created with Ctrl + drag
+- Region membership based on window center-point containment
+- Region dragging that moves assigned windows together
+- Region saving, template preview, delete, and restore
+- Apply Layout to move and resize real Windows application windows
+- Live Control mode for immediate real window movement while dragging
+- Window frame controls for focus, minimize, maximize, restore, close, and Work
+- Dock launcher for default pinned Windows applications
 
-InfiniteDesk removes the concept of a fixed desktop.
+## Live Control And Work Mode
 
-Instead of organizing applications within a single screen, users can place real application windows anywhere on an infinite 2D canvas and freely navigate through their workspace.
+InfiniteDesk does not embed Chrome, VS Code, or other app content inside React.
 
-```text
-                Chrome
+Instead, it controls the real Windows application windows by HWND:
 
-VS Code
+- Dragging a frame in Live Control mode moves the real window.
+- Clicking Focus brings the real window forward when Windows allows it.
+- Clicking Work focuses the real window and minimizes InfiniteDesk so the user can work inside the actual app.
+- Apply Layout moves all current canvas windows to their virtual positions.
 
-                           Discord
+This keeps applications real and interactive while InfiniteDesk acts as the spatial controller.
 
+## Getting Started
 
-       Terminal
+Install dependencies:
 
-                                 Notion
+```bash
+npm install
 ```
 
-Applications no longer compete for limited screen space.
+Run the app in development:
 
-The desktop becomes a virtually unlimited environment.
-
----
-
-## Problem
-
-Traditional desktop environments are monitor-centric.
-
-Users frequently experience:
-
-* Overlapping windows
-* Constant minimizing and restoring
-* Workspace switching overhead
-* Loss of spatial organization
-* Repetitive application arrangement
-
-As the number of active applications increases, productivity decreases.
-
----
-
-## Solution
-
-InfiniteDesk introduces an infinite virtual desktop where real application windows can exist beyond the boundaries of a physical monitor.
-
-Users can:
-
-* Move across an unlimited desktop space
-* Organize applications spatially
-* Group related applications together
-* Save layouts as reusable templates
-* Restore entire working environments instantly
-
----
-
-## Key Features
-
-### Infinite Canvas
-
-Navigate an unlimited desktop space.
-
-```text
-+--------------------------------------------------+
-
-Chrome
-
-                        VS Code
-
-
-     Discord
-
-
-                                 Terminal
-
-+--------------------------------------------------+
+```bash
+npm run dev
 ```
 
-Users are no longer restricted by monitor dimensions.
+Run validation:
 
----
-
-### Real Window Management
-
-InfiniteDesk works with actual Windows applications.
-
-Examples:
-
-* Chrome
-* Microsoft Edge
-* VS Code
-* Terminal
-* Discord
-* File Explorer
-* Notion
-* Figma Desktop
-
-No virtual representations.
-
-Real windows are managed directly.
-
----
-
-### Spatial Workspace Organization
-
-Applications can be organized by context.
-
-Example:
-
-```text
-Development Area
-├── VS Code
-├── Chrome
-└── Terminal
-
-Communication Area
-├── Discord
-└── Slack
-
-Documentation Area
-├── Notion
-└── Browser
+```bash
+npm run typecheck
+npm run build
+npm audit
 ```
 
----
+## Usage
 
-### Template System
+1. Start InfiniteDesk.
+2. Scan Windows from the floating InfiniteDesk menu or press Ctrl+R.
+3. Drag window frames to arrange a virtual layout.
+4. Ctrl + drag on empty canvas to create a Template Region.
+5. Drag windows into regions to assign them.
+6. Save Regions to persist region templates.
+7. Use Apply Layout to move real Windows windows to the current canvas layout.
+8. Use Work on a frame to switch from InfiniteDesk into the real application window.
 
-Save the current desktop arrangement as a template.
+## Keyboard Shortcuts
 
-```text
-Development
-Study
-Design
-Meeting
-Gaming
-```
-
-Templates store:
-
-* Application list
-* Window positions
-* Window sizes
-* Workspace structure
-
----
-
-### Session Restore
-
-Restore an entire working environment with a single action.
-
-```text
-Launch Template
-↓
-Start Applications
-↓
-Restore Positions
-↓
-Restore Sizes
-```
-
----
-
-### Multi-Monitor Support
-
-Use InfiniteDesk across multiple displays while maintaining a unified virtual desktop.
-
----
+- Ctrl+R: Scan Windows
+- Ctrl+S: Save Regions
+- Ctrl+Enter: Apply Layout
+- Ctrl+0: Fit View
+- Esc: Close overlays
 
 ## Architecture
 
 ```text
-┌───────────────────────────────┐
-│          React UI             │
-└──────────────┬────────────────┘
-               │
-               ▼
-┌───────────────────────────────┐
-│       Electron Desktop        │
-└──────────────┬────────────────┘
-               │
-    ┌──────────┼──────────┐
-    ▼          ▼          ▼
-
- Window     Process    Template
- Manager    Scanner     Engine
-
-               │
-               ▼
-
-         Windows API
+React Renderer
+  |
+  | preload IPC bridge
+  v
+Electron Main Process
+  |
+  | PowerShell script execution
+  v
+Win32 APIs
+  |
+  +-- EnumWindows / GetWindowText / GetWindowRect
+  +-- MoveWindow
+  +-- ShowWindow
+  +-- SetForegroundWindow / BringWindowToTop
+  +-- PostMessage(WM_CLOSE)
 ```
 
----
+Templates are stored in Electron `userData` as `templates.json`.
 
-## Tech Stack
+## Project Structure
 
-### Frontend
+```text
+src/
+  main/
+    index.ts        Electron main process and IPC handlers
+    windows.ps1     Win32 scanning and window control script
+  preload/
+    index.ts        Safe renderer IPC API
+  renderer/
+    main.tsx        React app shell
+    styles.css      Canvas and control styling
+    canvas/         Coordinate, layout, and region helpers
+    components/     Canvas and Dock components
+    dock/           Default Dock app definitions
+  shared/
+    types.ts        Shared IPC and domain types
+```
 
-* React
-* TypeScript
-* Zustand
+## Current Limitations
 
-### Desktop
+- App content is not embedded inside the canvas.
+- Real-time window thumbnails are not implemented.
+- DWM thumbnail integration is not implemented.
+- Multi-monitor behavior is not specially modeled yet.
+- Focus commands can be limited by Windows foreground restrictions.
+- Elevated/admin windows may reject control from a non-elevated InfiniteDesk process.
+- Dock apps are defined in code; installed app discovery is not implemented yet.
 
-* Electron
+## Next Direction
 
-### Native Integration
+The next major step is to choose a deeper live-desktop strategy:
 
-* Windows API
-* Process Management
-* Window Management
-
-### Storage
-
-* SQLite
-* JSON
-
----
-
-## MVP
-
-### Phase 1
-
-* Detect active windows
-* Read window position and size
-* Save desktop layouts
-* Restore layouts
-
-### Phase 2
-
-* Infinite canvas navigation
-* Window grouping
-* Template management
-
-### Phase 3
-
-* Application auto-launch
-* Session restoration
-* Multi-monitor synchronization
-
----
-
-## Vision
-
-InfiniteDesk is not a window tiling utility.
-
-It is not a launcher.
-
-It is not a workspace manager.
-
-InfiniteDesk reimagines the desktop itself.
-
-Instead of adapting work to the limitations of a monitor, users create their own desktop universe and place applications wherever they belong.
+- DWM thumbnails for live visual previews
+- Overlay/controller mode with better recall behavior
+- Optional native helper for stronger foreground and elevated-window control
+- Region-level apply and launch workflows
