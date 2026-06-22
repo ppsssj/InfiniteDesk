@@ -1,11 +1,13 @@
 import { app, BrowserWindow, ipcMain, screen, type Rectangle } from 'electron';
 import { join } from 'node:path';
+import { basename, extname } from 'node:path';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import type {
   ApplyLayoutInput,
   CreateTemplateInput,
+  CreateWorkspaceInput,
   DetectedWindow,
   DockApp,
   DwmPreviewResult,
@@ -16,11 +18,12 @@ import type {
   LaunchResult,
   LayoutTemplate,
   MoveEmbeddedWindowParams,
-  MoveWindowResult,
   OverlayModeResult,
   RestoreResult,
+  SavedWorkspace,
   WindowCommand,
-  WindowCommandResult
+  WindowCommandResult,
+  WorkspaceRegion
 } from '../shared/types';
 
 const isDev = !app.isPackaged;
@@ -37,6 +40,8 @@ const MAX_INITIAL_WINDOW_WIDTH = 1440;
 const MAX_INITIAL_WINDOW_HEIGHT = 920;
 const MIN_WINDOW_WIDTH = 720;
 const MIN_WINDOW_HEIGHT = 480;
+const APP_SCAN_MAX_DEPTH = 6;
+const APP_SCAN_EXTENSIONS = new Set(['.lnk', '.url', '.exe']);
 
 function clampNumber(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -139,27 +144,45 @@ function createWindow(): void {
   }
 }
 
-function getStoragePath(): string {
+function getTemplatesStoragePath(): string {
   return join(app.getPath('userData'), 'templates.json');
 }
 
-async function ensureStorage(): Promise<void> {
+function getWorkspacesStoragePath(): string {
+  return join(app.getPath('userData'), 'workspaces.json');
+}
+
+async function ensureJsonStorage(path: string): Promise<void> {
   await mkdir(app.getPath('userData'), { recursive: true });
-  const storagePath = getStoragePath();
-  if (!existsSync(storagePath)) {
-    await writeFile(storagePath, '[]', 'utf8');
+  if (!existsSync(path)) {
+    await writeFile(path, '[]', 'utf8');
   }
 }
 
 async function readTemplates(): Promise<LayoutTemplate[]> {
-  await ensureStorage();
-  const raw = await readFile(getStoragePath(), 'utf8');
+  const storagePath = getTemplatesStoragePath();
+  await ensureJsonStorage(storagePath);
+  const raw = await readFile(storagePath, 'utf8');
   return JSON.parse(raw) as LayoutTemplate[];
 }
 
 async function writeTemplates(templates: LayoutTemplate[]): Promise<void> {
-  await ensureStorage();
-  await writeFile(getStoragePath(), JSON.stringify(templates, null, 2), 'utf8');
+  const storagePath = getTemplatesStoragePath();
+  await ensureJsonStorage(storagePath);
+  await writeFile(storagePath, JSON.stringify(templates, null, 2), 'utf8');
+}
+
+async function readWorkspaces(): Promise<SavedWorkspace[]> {
+  const storagePath = getWorkspacesStoragePath();
+  await ensureJsonStorage(storagePath);
+  const raw = await readFile(storagePath, 'utf8');
+  return JSON.parse(raw) as SavedWorkspace[];
+}
+
+async function writeWorkspaces(workspaces: SavedWorkspace[]): Promise<void> {
+  const storagePath = getWorkspacesStoragePath();
+  await ensureJsonStorage(storagePath);
+  await writeFile(storagePath, JSON.stringify(workspaces, null, 2), 'utf8');
 }
 
 function getScriptPath(): string {
@@ -294,6 +317,104 @@ function normalizeEmbedBounds(params: Pick<EmbedWindowParams, 'x' | 'y' | 'width
     '-Height',
     String(Math.max(60, Math.round(params.height)))
   ];
+}
+
+function getDockAppId(path: string): string {
+  return `local-${Buffer.from(path.toLowerCase()).toString('base64url').slice(0, 42)}`;
+}
+
+function getAppSearchRoots(): string[] {
+  return [
+    process.env.APPDATA ? join(process.env.APPDATA, 'Microsoft/Windows/Start Menu/Programs') : '',
+    process.env.ProgramData ? join(process.env.ProgramData, 'Microsoft/Windows/Start Menu/Programs') : '',
+    process.env.USERPROFILE ? join(process.env.USERPROFILE, 'Desktop') : '',
+    process.env.PUBLIC ? join(process.env.PUBLIC, 'Desktop') : ''
+  ].filter((path) => path.length > 0 && existsSync(path));
+}
+
+function getDockAppName(path: string): string {
+  return basename(path, extname(path)).replace(/\s+-\s+Shortcut$/i, '').trim();
+}
+
+async function getDockAppIconDataUrl(path: string): Promise<string | undefined> {
+  try {
+    const icon = await app.getFileIcon(path, { size: 'normal' });
+    if (icon.isEmpty()) {
+      return undefined;
+    }
+
+    return icon.toDataURL();
+  } catch {
+    return undefined;
+  }
+}
+
+async function collectDockAppsFromDirectory(root: string, depth = 0): Promise<DockApp[]> {
+  if (depth > APP_SCAN_MAX_DEPTH) {
+    return [];
+  }
+
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  const apps: DockApp[] = [];
+
+  for (const entry of entries) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) {
+      apps.push(...(await collectDockAppsFromDirectory(path, depth + 1)));
+      continue;
+    }
+
+    if (!entry.isFile()) {
+      continue;
+    }
+
+    const extension = extname(entry.name).toLowerCase();
+    if (!APP_SCAN_EXTENSIONS.has(extension)) {
+      continue;
+    }
+
+    const name = getDockAppName(path);
+    if (name.length === 0 || name.toLowerCase().includes('uninstall')) {
+      continue;
+    }
+
+    apps.push({
+      id: getDockAppId(path),
+      name,
+      executablePath: path,
+      icon: name.slice(0, 2).toUpperCase(),
+      isPinned: false
+    });
+  }
+
+  return apps;
+}
+
+async function listLocalDockApps(): Promise<DockApp[]> {
+  const roots = getAppSearchRoots();
+  const discovered = (await Promise.all(roots.map((root) => collectDockAppsFromDirectory(root).catch(() => [])))).flat();
+  const seen = new Set<string>();
+
+  const uniqueApps = discovered
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .filter((dockApp) => {
+      const key = `${dockApp.name.toLowerCase()}|${dockApp.executablePath.toLowerCase()}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+
+  const appsWithIcons: DockApp[] = [];
+  for (const dockApp of uniqueApps) {
+    appsWithIcons.push({
+      ...dockApp,
+      iconDataUrl: await getDockAppIconDataUrl(dockApp.executablePath)
+    });
+  }
+
+  return appsWithIcons;
 }
 
 function runEmbeddedMove(params: MoveEmbeddedWindowParams): Promise<EmbedResult> {
@@ -444,6 +565,70 @@ ipcMain.handle('templates:delete', async (_event, id: string): Promise<void> => 
   await writeTemplates(templates.filter((template) => template.id !== id));
 });
 
+ipcMain.handle('workspaces:list', async (): Promise<SavedWorkspace[]> => {
+  return readWorkspaces();
+});
+
+ipcMain.handle('workspaces:create', async (_event, input: CreateWorkspaceInput): Promise<SavedWorkspace> => {
+  const workspaceWindows = input.windows.filter(
+    (windowInfo) =>
+      windowInfo.isRestorable &&
+      !windowInfo.isInternal &&
+      windowInfo.x !== null &&
+      windowInfo.y !== null &&
+      windowInfo.width !== null &&
+      windowInfo.height !== null
+  );
+
+  const workspaceRegions: WorkspaceRegion[] = input.regions.map((region) => ({
+    id: region.id,
+    name: region.name,
+    x: Math.round(region.x),
+    y: Math.round(region.y),
+    width: Math.max(80, Math.round(region.width)),
+    height: Math.max(60, Math.round(region.height)),
+    windowIds: region.windowIds,
+    color: region.color,
+    createdAt: region.createdAt
+  }));
+
+  if (workspaceWindows.length === 0 && workspaceRegions.length === 0) {
+    throw new Error('There is no canvas state to save as a workspace.');
+  }
+
+  const now = new Date().toISOString();
+  const workspace: SavedWorkspace = {
+    id: crypto.randomUUID(),
+    name: input.name.trim() || `Workspace ${new Date().toLocaleString()}`,
+    createdAt: now,
+    updatedAt: now,
+    windows: workspaceWindows,
+    regions: workspaceRegions
+  };
+
+  const workspaces = await readWorkspaces();
+  workspaces.unshift(workspace);
+  await writeWorkspaces(workspaces);
+  return workspace;
+});
+
+ipcMain.handle('workspaces:delete', async (_event, id: string): Promise<void> => {
+  const workspaces = await readWorkspaces();
+  await writeWorkspaces(workspaces.filter((workspace) => workspace.id !== id));
+});
+
+ipcMain.handle('workspaces:restore', async (_event, id: string): Promise<RestoreResult> => {
+  const workspaces = await readWorkspaces();
+  const workspace = workspaces.find((item) => item.id === id);
+  if (!workspace) {
+    throw new Error('Workspace not found.');
+  }
+
+  const payloadPath = join(app.getPath('temp'), `infinitedesk-workspace-${workspace.id}.json`);
+  await writeFile(payloadPath, JSON.stringify({ windows: workspace.windows }), 'utf8');
+  return runWindowsScript<RestoreResult>(['-Action', 'restore', '-PayloadPath', payloadPath]);
+});
+
 ipcMain.handle('templates:restore', async (_event, id: string): Promise<RestoreResult> => {
   const templates = await readTemplates();
   const template = templates.find((item) => item.id === id);
@@ -474,39 +659,6 @@ ipcMain.handle('layout:apply', async (_event, input: ApplyLayoutInput): Promise<
   const payloadPath = join(app.getPath('temp'), `infinitedesk-apply-${crypto.randomUUID()}.json`);
   await writeFile(payloadPath, JSON.stringify({ windows: restorableWindows }), 'utf8');
   return runWindowsScript<RestoreResult>(['-Action', 'restore', '-PayloadPath', payloadPath]);
-});
-
-ipcMain.handle('window:move', async (_event, windowInfo: DetectedWindow): Promise<MoveWindowResult> => {
-  if (
-    !windowInfo.hwnd ||
-    windowInfo.isInternal ||
-    !windowInfo.isRestorable ||
-    windowInfo.x === null ||
-    windowInfo.y === null ||
-    windowInfo.width === null ||
-    windowInfo.height === null
-  ) {
-    return {
-      success: false,
-      hwnd: windowInfo.hwnd || '',
-      error: 'Window is not a restorable external target.'
-    };
-  }
-
-  return runWindowsScript<MoveWindowResult>([
-    '-Action',
-    'move',
-    '-Hwnd',
-    windowInfo.hwnd,
-    '-X',
-    String(Math.round(windowInfo.x)),
-    '-Y',
-    String(Math.round(windowInfo.y)),
-    '-Width',
-    String(Math.round(windowInfo.width)),
-    '-Height',
-    String(Math.round(windowInfo.height))
-  ]);
 });
 
 ipcMain.handle('window:focus', async (_event, hwnd: string): Promise<FocusWindowResult> => {
@@ -610,6 +762,10 @@ ipcMain.handle('app:set-overlay-mode', async (event, enabled: boolean): Promise<
       error: (error as Error).message
     };
   }
+});
+
+ipcMain.handle('app:quit', (): void => {
+  app.quit();
 });
 
 ipcMain.handle('window:embed', async (event, params: EmbedWindowParams): Promise<EmbedResult> => {
@@ -731,6 +887,10 @@ ipcMain.handle('dwm:clear-previews', (): DwmPreviewResult => {
   return sendDwmPreviewCommand({ action: 'clear' });
 });
 
+ipcMain.handle('dock:list-apps', async (): Promise<DockApp[]> => {
+  return listLocalDockApps();
+});
+
 ipcMain.handle('dock:launch-app', async (_event, dockApp: DockApp): Promise<LaunchResult> => {
   if (!dockApp.executablePath || dockApp.executablePath.trim().length === 0) {
     return { success: false, error: 'No executable path was provided.' };
@@ -738,12 +898,24 @@ ipcMain.handle('dock:launch-app', async (_event, dockApp: DockApp): Promise<Laun
 
   return new Promise((resolve) => {
     try {
-      const child = spawn(dockApp.executablePath, dockApp.args || [], {
-        detached: true,
-        shell: false,
-        windowsHide: false,
-        stdio: 'ignore'
-      });
+      const extension = extname(dockApp.executablePath).toLowerCase();
+      const child =
+        extension === '.lnk' || extension === '.url'
+          ? spawn(
+              'powershell.exe',
+              ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', 'Start-Process -FilePath $args[0]', dockApp.executablePath],
+              {
+                detached: true,
+                windowsHide: true,
+                stdio: 'ignore'
+              }
+            )
+          : spawn(dockApp.executablePath, dockApp.args || [], {
+              detached: true,
+              shell: false,
+              windowsHide: false,
+              stdio: 'ignore'
+            });
 
       child.once('error', (error) => {
         resolve({

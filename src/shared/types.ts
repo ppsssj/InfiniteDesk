@@ -26,6 +26,33 @@ export type CreateTemplateInput = {
   windows: DetectedWindow[];
 };
 
+export type WorkspaceRegion = {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  windowIds: string[];
+  color?: string;
+  createdAt: string;
+};
+
+export type SavedWorkspace = {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  windows: DetectedWindow[];
+  regions: WorkspaceRegion[];
+};
+
+export type CreateWorkspaceInput = {
+  name: string;
+  windows: DetectedWindow[];
+  regions: WorkspaceRegion[];
+};
+
 export type ApplyLayoutInput = {
   windows: DetectedWindow[];
 };
@@ -36,18 +63,13 @@ export type DockApp = {
   executablePath: string;
   args?: string[];
   icon?: string;
+  iconDataUrl?: string;
   processName?: string;
   isPinned: boolean;
 };
 
 export type LaunchResult = {
   success: boolean;
-  error?: string;
-};
-
-export type MoveWindowResult = {
-  success: boolean;
-  hwnd: string;
   error?: string;
 };
 

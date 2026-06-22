@@ -21,13 +21,12 @@ It does not replace Windows Explorer or act as a shell. Real applications remain
 - Apply the current canvas layout to real Windows windows.
 - Focus, minimize, maximize, restore, close, and Work in a real window.
 - Launch default pinned apps from the bottom Dock.
-- Use Live Control mode to move real windows immediately while dragging.
 - Use Native Overlay mode as a translucent control layer over the desktop.
-- Experimentally reparent real windows into InfiniteDesk nodes with Win32 `SetParent`.
+- Use Interactive Control to attach real windows into InfiniteDesk nodes with Win32 `SetParent`.
 
 ## Design Direction
 
-InfiniteDesk is moving toward a Native Overlay + Live Window Control model.
+InfiniteDesk is moving toward a Native Overlay + Interactive Control model.
 
 The main workflow is:
 
@@ -36,7 +35,7 @@ The main workflow is:
 3. Real interaction still happens in the actual Windows application.
 4. InfiniteDesk controls those windows through HWND-based Win32 commands.
 
-DWM thumbnails are useful for overview, but they are not a direct input surface. Experimental reparenting can make a real application appear inside a node, but it is not stable enough to be the default direction.
+DWM thumbnails are useful for overview, but they are not a direct input surface. Interactive Control can make a real application appear inside a node for direct input, though some apps can still behave unpredictably.
 
 ## Requirements
 
@@ -102,7 +101,7 @@ Electron Main Process
   |     +-- EnumWindows / GetWindowText / GetWindowRect
   |     +-- MoveWindow / SetWindowPos
   |     +-- ShowWindow / SetForegroundWindow
-  |     +-- SetParent / GetParent for experimental embed mode
+  |     +-- SetParent / GetParent for Interactive Control
   |
   +-- DWM preview host process
         |
@@ -138,7 +137,7 @@ docs/
 ## Current Limitations
 
 - DWM previews are visual only. They do not directly forward mouse or keyboard input.
-- Experimental embed mode can behave differently across apps and should be treated as unstable.
+- Interactive Control can behave differently across apps and should be treated as app-dependent.
 - Chrome, Edge, VS Code, Electron apps, and elevated/admin windows may reject or behave oddly under native control.
 - Focus commands are limited by Windows foreground restrictions.
 - Multi-monitor layout persistence is not deeply modeled yet.

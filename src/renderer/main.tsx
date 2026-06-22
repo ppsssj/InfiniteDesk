@@ -1,9 +1,37 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Box, ChevronDown, Eye, Layers, LocateFixed, Menu, Minus, Plus, Power, RefreshCw, RotateCcw, Save, Send, Trash2, Undo2, X } from 'lucide-react';
-import type { DetectedWindow, DockApp, DwmPreviewWindow, LayoutTemplate, MoveEmbeddedWindowParams, RestoreResult, WindowCommand } from '../shared/types';
+import {
+  Box,
+  BriefcaseBusiness,
+  ChevronDown,
+  Eye,
+  Layers,
+  LocateFixed,
+  LogOut,
+  Menu,
+  Minus,
+  Palette,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Save,
+  Send,
+  Trash2,
+  Undo2
+} from 'lucide-react';
+import type {
+  DetectedWindow,
+  DockApp,
+  DwmPreviewWindow,
+  LayoutTemplate,
+  MoveEmbeddedWindowParams,
+  RestoreResult,
+  SavedWorkspace,
+  WindowCommand,
+  WorkspaceRegion
+} from '../shared/types';
 import { createRegionFromTemplate, getWindowIdentity, getWindowsForRegion, updateRegionMembership } from './canvas/regions';
-import { createInitialVirtualLayout, toVirtualWindow } from './canvas/windows';
+import { createInitialVirtualLayout, toVirtualWindow, toVirtualWindows } from './canvas/windows';
 import type { TemplateRegion, VirtualWindowState } from './canvas/types';
 import { CanvasPreview } from './components/CanvasPreview';
 import { Dock } from './components/Dock';
@@ -32,43 +60,140 @@ function restoreResultText(result: RestoreResult): string {
   return `Restored ${result.restored} windows.${skippedText}`;
 }
 
+function interactiveControlNote(processName: string): string {
+  const normalized = processName.toLowerCase();
+  if (normalized.includes('kakao')) {
+    return 'Custom UI. Detach if input or scaling looks off.';
+  }
+  if (normalized.includes('chrome') || normalized.includes('edge') || normalized.includes('msedge')) {
+    return 'Browser windows may resist reparenting.';
+  }
+  if (normalized.includes('electron') || normalized.includes('code')) {
+    return 'Electron apps can have focus quirks.';
+  }
+  return 'Ready for direct input.';
+}
+
 function App(): React.JSX.Element {
   const [windows, setWindows] = useState<DetectedWindow[]>([]);
   const [virtualWindows, setVirtualWindows] = useState<VirtualWindowState[]>([]);
   const [initialVirtualWindows, setInitialVirtualWindows] = useState<VirtualWindowState[]>([]);
   const [regions, setRegions] = useState<TemplateRegion[]>([]);
   const [templates, setTemplates] = useState<LayoutTemplate[]>([]);
+  const [workspaces, setWorkspaces] = useState<SavedWorkspace[]>([]);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [isBrandMenuOpen, setIsBrandMenuOpen] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [message, setMessage] = useState('Scan Windows to start. Then Ctrl+Drag on the canvas to create a template region.');
   const [error, setError] = useState<string | null>(null);
   const [previewTemplate, setPreviewTemplate] = useState<LayoutTemplate | null>(null);
+  const [previewWorkspace, setPreviewWorkspace] = useState<SavedWorkspace | null>(null);
+  const [themeMode, setThemeMode] = useState<'mist' | 'graphite'>('mist');
   const [fitSignal, setFitSignal] = useState(0);
   const [resetViewSignal, setResetViewSignal] = useState(0);
   const [zoomInSignal, setZoomInSignal] = useState(0);
   const [zoomOutSignal, setZoomOutSignal] = useState(0);
   const [zoomScale, setZoomScale] = useState(1);
   const [launchingAppId, setLaunchingAppId] = useState<string | null>(null);
+  const [localDockApps, setLocalDockApps] = useState<DockApp[]>([]);
+  const [isLoadingDockApps, setIsLoadingDockApps] = useState(false);
+  const [isDockOverlayActive, setIsDockOverlayActive] = useState(false);
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
-  const [liveControlEnabled, setLiveControlEnabled] = useState(false);
   const [overlayModeEnabled, setOverlayModeEnabled] = useState(false);
-  const [experimentalEmbedEnabled, setExperimentalEmbedEnabled] = useState(false);
   const [embeddedWindowIds, setEmbeddedWindowIds] = useState<string[]>([]);
 
   const canvasLabel = previewTemplate
     ? `Previewing template: ${previewTemplate.name}`
+    : previewWorkspace
+      ? `Previewing workspace: ${previewWorkspace.name}`
     : `${virtualWindows.length} windows - ${regions.length} regions`;
   const dirtyCount = virtualWindows.filter((windowInfo) => windowInfo.isDirty).length + regions.filter((region) => region.isDirty).length;
   const restorableCount = useMemo(() => windows.filter((windowInfo) => windowInfo.isRestorable && !windowInfo.isInternal).length, [windows]);
   const selectedRegion = selectedRegionId ? regions.find((region) => region.id === selectedRegionId) || null : null;
+  const attachedInteractiveWindows = useMemo(
+    () =>
+      embeddedWindowIds.map((hwnd) => {
+        const windowInfo = virtualWindows.find((item) => item.hwnd === hwnd);
+        return {
+          hwnd,
+          title: windowInfo?.title || hwnd,
+          processName: windowInfo?.processName || 'unknown',
+          note: interactiveControlNote(windowInfo?.processName || '')
+        };
+      }),
+    [embeddedWindowIds, virtualWindows]
+  );
+  const dockApps = useMemo(() => {
+    const apps = [...defaultDockApps, ...localDockApps];
+    const seen = new Set<string>();
+    return apps.filter((app) => {
+      const key = `${app.name.toLowerCase()}|${app.executablePath.toLowerCase()}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+  }, [localDockApps]);
+  const canvasSafeArea = useMemo(
+    () => ({
+      left: 260,
+      top: 88,
+      right: isDrawerOpen ? 380 : 220,
+      bottom: 110
+    }),
+    [isDrawerOpen]
+  );
 
   async function loadTemplates(): Promise<void> {
     const loaded = await window.infiniteDesk.listTemplates();
     setTemplates(loaded);
   }
 
-  function loadVirtualLayout(nextWindows: VirtualWindowState[], nextRegions: TemplateRegion[], template: LayoutTemplate | null): void {
+  async function loadWorkspaces(): Promise<void> {
+    const loaded = await window.infiniteDesk.listWorkspaces();
+    setWorkspaces(loaded);
+  }
+
+  async function loadDockApps(): Promise<void> {
+    setIsLoadingDockApps(true);
+    try {
+      const loaded = await window.infiniteDesk.listDockApps();
+      setLocalDockApps(loaded);
+    } catch (dockError) {
+      setError(`Could not load local apps: ${(dockError as Error).message}`);
+    } finally {
+      setIsLoadingDockApps(false);
+    }
+  }
+
+  function workspaceRegionToTemplateRegion(region: WorkspaceRegion): TemplateRegion {
+    return {
+      ...region,
+      isDirty: false
+    };
+  }
+
+  function regionToWorkspaceRegion(region: TemplateRegion): WorkspaceRegion {
+    return {
+      id: region.id,
+      name: region.name,
+      x: Math.round(region.x),
+      y: Math.round(region.y),
+      width: Math.round(region.width),
+      height: Math.round(region.height),
+      windowIds: region.windowIds,
+      color: region.color,
+      createdAt: region.createdAt
+    };
+  }
+
+  function loadVirtualLayout(
+    nextWindows: VirtualWindowState[],
+    nextRegions: TemplateRegion[],
+    template: LayoutTemplate | null,
+    workspace: SavedWorkspace | null = null
+  ): void {
     const normalizedWindows = nextWindows.map((windowInfo) => ({
       ...windowInfo,
       initialVirtualX: windowInfo.virtualX,
@@ -85,6 +210,7 @@ function App(): React.JSX.Element {
     setRegions(normalizedRegions);
     setSelectedRegionId(null);
     setPreviewTemplate(template);
+    setPreviewWorkspace(workspace);
     setFitSignal((value) => value + 1);
   }
 
@@ -277,18 +403,41 @@ function App(): React.JSX.Element {
     setIsBrandMenuOpen(false);
   }
 
-  async function moveLiveWindow(windowInfo: VirtualWindowState): Promise<void> {
-    if (!windowInfo.hwnd) {
+  async function saveWorkspace(): Promise<void> {
+    if (virtualWindows.length === 0 && regions.length === 0) {
+      setError('There is no canvas state to save as a workspace.');
       return;
     }
 
+    const name = window.prompt('Workspace name', previewWorkspace?.name || `Workspace ${new Date().toLocaleString()}`);
+    if (name === null) {
+      return;
+    }
+
+    setError(null);
     try {
-      const result = await window.infiniteDesk.moveWindow(virtualWindowToDetected(windowInfo));
-      if (!result.success) {
-        setError(result.error || `Could not move ${windowInfo.title}.`);
-      }
-    } catch (moveError) {
-      setError((moveError as Error).message);
+      const savedWindows = virtualWindows.map((windowInfo) => ({
+        ...windowInfo,
+        initialVirtualX: windowInfo.virtualX,
+        initialVirtualY: windowInfo.virtualY,
+        isDirty: false
+      }));
+      const workspace = await window.infiniteDesk.createWorkspace({
+        name,
+        windows: savedWindows.map(virtualWindowToDetected),
+        regions: regions.map(regionToWorkspaceRegion)
+      });
+      await loadWorkspaces();
+      setPreviewWorkspace(workspace);
+      setPreviewTemplate(null);
+      setRegions((current) => current.map((region) => ({ ...region, isDirty: false })));
+      setVirtualWindows(savedWindows);
+      setInitialVirtualWindows(savedWindows);
+      setMessage(`Saved workspace "${workspace.name}" with ${workspace.windows.length} windows and ${workspace.regions.length} regions.`);
+    } catch (saveError) {
+      setError((saveError as Error).message);
+    } finally {
+      setIsBrandMenuOpen(false);
     }
   }
 
@@ -355,7 +504,7 @@ function App(): React.JSX.Element {
       }
 
       setEmbeddedWindowIds((current) => (current.includes(windowInfo.hwnd!) ? current : [...current, windowInfo.hwnd!]));
-      setMessage(`Embedded "${windowInfo.title}" into its process node.`);
+      setMessage(`Interactive control attached "${windowInfo.title}" inside its process node.`);
     } catch (embedError) {
       setError((embedError as Error).message);
     }
@@ -371,10 +520,43 @@ function App(): React.JSX.Element {
       }
 
       setEmbeddedWindowIds((current) => current.filter((item) => item !== hwnd));
-      setMessage('Detached embedded window.');
+      setMessage('Detached interactive window.');
     } catch (detachError) {
       setError((detachError as Error).message);
     }
+  }
+
+  async function detachAllInteractiveWindows(): Promise<void> {
+    if (embeddedWindowIds.length === 0) {
+      setMessage('No interactive windows are attached.');
+      return;
+    }
+
+    setError(null);
+    const failedHwnds: string[] = [];
+    const failedMessages: string[] = [];
+    for (const hwnd of embeddedWindowIds) {
+      try {
+        const result = await window.infiniteDesk.detachEmbeddedWindow(hwnd);
+        if (!result.success) {
+          failedHwnds.push(hwnd);
+          failedMessages.push(result.error || hwnd);
+        }
+      } catch (detachError) {
+        failedHwnds.push(hwnd);
+        failedMessages.push((detachError as Error).message);
+      }
+    }
+
+    if (failedHwnds.length > 0) {
+      const failedSet = new Set(failedHwnds);
+      setEmbeddedWindowIds((current) => current.filter((hwnd) => failedSet.has(hwnd)));
+      setError(`Could not detach ${failedHwnds.length} interactive windows. ${failedMessages.join(' ')}`);
+      return;
+    }
+
+    setEmbeddedWindowIds([]);
+    setMessage('Detached all interactive windows.');
   }
 
   async function moveEmbeddedWindow(params: MoveEmbeddedWindowParams): Promise<void> {
@@ -401,46 +583,12 @@ function App(): React.JSX.Element {
     }
   }
 
-  function toggleExperimentalEmbedMode(): void {
-    if (experimentalEmbedEnabled) {
-      setExperimentalEmbedEnabled(false);
-      setMessage('Experimental Embed Mode disabled. Existing embedded windows can still be detached from their nodes.');
-      return;
-    }
-
-    const confirmed = window.confirm(
-      'Experimental Embed Mode uses Win32 SetParent to attach external app windows into InfiniteDesk. Some apps can behave incorrectly. Continue?'
-    );
-    if (!confirmed) {
-      return;
-    }
-
-    setExperimentalEmbedEnabled(true);
-    setMessage('Experimental Embed Mode enabled. Use Embed on a process node to test real app content inside it.');
-  }
-
-  function toggleLiveControl(): void {
-    if (liveControlEnabled) {
-      setLiveControlEnabled(false);
-      setMessage('Live Control disabled. Dragging is virtual-only.');
-      return;
-    }
-
-    const confirmed = window.confirm('Live Control moves real Windows windows immediately. Turn it on?');
-    if (!confirmed) {
-      return;
-    }
-
-    setLiveControlEnabled(true);
-    setMessage('Live Control enabled. Dragging frames moves real windows immediately.');
-  }
-
   async function toggleOverlayMode(): Promise<void> {
     const nextEnabled = !overlayModeEnabled;
 
     if (nextEnabled) {
       const confirmed = window.confirm(
-        'Native Overlay keeps InfiniteDesk above real windows and enables Live Control. Dragging frames will move real Windows windows immediately.'
+        'Native Overlay keeps InfiniteDesk above real windows as a translucent control layer. Turn it on?'
       );
       if (!confirmed) {
         return;
@@ -456,10 +604,9 @@ function App(): React.JSX.Element {
       }
 
       setOverlayModeEnabled(result.enabled);
-      setLiveControlEnabled(result.enabled);
       setMessage(
         result.enabled
-          ? 'Native Overlay enabled. InfiniteDesk is now a live control layer over real windows.'
+          ? 'Native Overlay enabled. InfiniteDesk is now layered over real windows.'
           : 'Native Overlay disabled. InfiniteDesk returned to normal controller mode.'
       );
     } catch (overlayError) {
@@ -469,11 +616,34 @@ function App(): React.JSX.Element {
     }
   }
 
+  async function quitInfiniteDesk(): Promise<void> {
+    setError(null);
+    try {
+      await window.infiniteDesk.quitApp();
+    } catch (quitError) {
+      setError((quitError as Error).message);
+    }
+  }
+
+  function toggleThemeMode(): void {
+    setThemeMode((current) => (current === 'mist' ? 'graphite' : 'mist'));
+  }
+
   async function restoreTemplate(template: LayoutTemplate): Promise<void> {
     setError(null);
     try {
       const result = await window.infiniteDesk.restoreTemplate(template.id);
       setMessage(`Restored "${template.name}". ${restoreResultText(result)}`);
+    } catch (restoreError) {
+      setError((restoreError as Error).message);
+    }
+  }
+
+  async function restoreWorkspace(workspace: SavedWorkspace): Promise<void> {
+    setError(null);
+    try {
+      const result = await window.infiniteDesk.restoreWorkspace(workspace.id);
+      setMessage(`Restored workspace "${workspace.name}". ${restoreResultText(result)}`);
     } catch (restoreError) {
       setError((restoreError as Error).message);
     }
@@ -488,11 +658,29 @@ function App(): React.JSX.Element {
     setMessage(`Deleted "${template.name}".`);
   }
 
+  async function deleteWorkspace(workspace: SavedWorkspace): Promise<void> {
+    await window.infiniteDesk.deleteWorkspace(workspace.id);
+    if (previewWorkspace?.id === workspace.id) {
+      setPreviewWorkspace(null);
+    }
+    await loadWorkspaces();
+    setMessage(`Deleted workspace "${workspace.name}".`);
+  }
+
   function previewTemplateOnCanvas(template: LayoutTemplate): void {
     const { region, windows: templateWindows } = createRegionFromTemplate(template);
     loadVirtualLayout(templateWindows, region ? [region] : [], template);
     setIsDrawerOpen(false);
     setMessage(`Previewing template "${template.name}". Region bounds were created around saved windows.`);
+  }
+
+  function previewWorkspaceOnCanvas(workspace: SavedWorkspace): void {
+    const workspaceWindows = toVirtualWindows(workspace.windows);
+    const workspaceRegions = workspace.regions.map(workspaceRegionToTemplateRegion);
+    setWindows(workspace.windows);
+    loadVirtualLayout(workspaceWindows, workspaceRegions, null, workspace);
+    setIsDrawerOpen(false);
+    setMessage(`Loaded workspace "${workspace.name}" onto the canvas.`);
   }
 
   function resetLayoutEdits(): void {
@@ -504,6 +692,8 @@ function App(): React.JSX.Element {
 
   useEffect(() => {
     void loadTemplates();
+    void loadWorkspaces();
+    void loadDockApps();
     void scanWindows();
   }, []);
 
@@ -539,22 +729,21 @@ function App(): React.JSX.Element {
 
     window.addEventListener('keydown', handleShortcuts);
     return () => window.removeEventListener('keydown', handleShortcuts);
-  }, [virtualWindows, regions, overlayModeEnabled, liveControlEnabled]);
+  }, [virtualWindows, regions, overlayModeEnabled]);
 
   return (
-    <main className={`immersive-shell ${overlayModeEnabled ? 'overlay-mode' : ''}`}>
+    <main className={`immersive-shell theme-${themeMode} ${overlayModeEnabled ? 'overlay-mode' : ''}`}>
       <CanvasPreview
         windows={virtualWindows}
         regions={regions}
         previewLabel={canvasLabel}
+        safeArea={canvasSafeArea}
+        uiOverlayActive={isBrandMenuOpen || isDrawerOpen || isDockOverlayActive}
         selectedRegionId={selectedRegionId}
-        liveControlEnabled={liveControlEnabled}
-        experimentalEmbedEnabled={experimentalEmbedEnabled}
         embeddedWindowIds={embeddedWindowIds}
         onWindowsChange={setVirtualWindows}
         onRegionsChange={setRegions}
         onSelectRegion={setSelectedRegionId}
-        onLiveMoveWindow={(windowInfo) => void moveLiveWindow(windowInfo)}
         onWorkWindow={(hwnd) => void workInRealWindow(hwnd)}
         onWindowCommand={(hwnd, command) => void controlRealWindow(hwnd, command)}
         onEmbedWindow={(windowInfo, bounds) => void embedRealWindow(windowInfo, bounds)}
@@ -589,6 +778,10 @@ function App(): React.JSX.Element {
               <Save size={15} />
               Save Regions
             </button>
+            <button onClick={() => void saveWorkspace()}>
+              <BriefcaseBusiness size={15} />
+              Save Workspace
+            </button>
             <button onClick={() => void applyCanvasLayout()} disabled={virtualWindows.length === 0}>
               <Send size={15} />
               Apply Layout
@@ -597,21 +790,25 @@ function App(): React.JSX.Element {
               <RotateCcw size={15} />
               Reset Edits
             </button>
-            <button onClick={toggleLiveControl}>
-              <Power size={15} />
-              Live Control {liveControlEnabled ? 'Off' : 'On'}
-            </button>
             <button onClick={() => void toggleOverlayMode()}>
               <LocateFixed size={15} />
               Native Overlay {overlayModeEnabled ? 'Off' : 'On'}
             </button>
-            <button onClick={toggleExperimentalEmbedMode}>
+            <button onClick={() => void detachAllInteractiveWindows()} disabled={embeddedWindowIds.length === 0}>
               <Box size={15} />
-              Experimental Embed {experimentalEmbedEnabled ? 'Off' : 'On'}
+              Detach All Interactive
             </button>
             <button onClick={() => setIsDrawerOpen(true)}>
               <Menu size={15} />
               Details
+            </button>
+            <button onClick={toggleThemeMode}>
+              <Palette size={15} />
+              Theme: {themeMode === 'mist' ? 'Mist' : 'Graphite'}
+            </button>
+            <button className="danger-menu-action" onClick={() => void quitInfiniteDesk()}>
+              <LogOut size={15} />
+              Quit InfiniteDesk
             </button>
           </div>
         ) : null}
@@ -629,19 +826,14 @@ function App(): React.JSX.Element {
         <button onClick={() => setIsDrawerOpen((value) => !value)}>{isDrawerOpen ? 'Close' : 'Details'}</button>
       </div>
 
-      <button className={`live-control-pill ${liveControlEnabled ? 'enabled' : ''}`} onClick={toggleLiveControl}>
-        <Power size={14} />
-        Live Control: {liveControlEnabled ? 'On' : 'Off'}
-      </button>
-
       <button className={`overlay-mode-pill ${overlayModeEnabled ? 'enabled' : ''}`} onClick={() => void toggleOverlayMode()}>
         <LocateFixed size={14} />
         Native Overlay: {overlayModeEnabled ? 'On' : 'Off'}
       </button>
 
-      <button className={`experimental-embed-pill ${experimentalEmbedEnabled ? 'enabled' : ''}`} onClick={toggleExperimentalEmbedMode}>
+      <button className="interactive-control-pill enabled" onClick={() => setIsDrawerOpen(true)}>
         <Box size={14} />
-        Experimental Embed: {experimentalEmbedEnabled ? 'On' : 'Off'}
+        Interactive Control: On
       </button>
 
       <button className="floating-help-button" onClick={() => setIsDrawerOpen(true)} title="Show shortcuts and workflow help">
@@ -652,7 +844,14 @@ function App(): React.JSX.Element {
 
       {error ? <div className="floating-error">{error}</div> : null}
 
-      <Dock apps={defaultDockApps} launchingAppId={launchingAppId} onLaunch={(dockApp) => void launchDockApp(dockApp)} />
+      <Dock
+        apps={dockApps}
+        pinnedApps={defaultDockApps}
+        launchingAppId={launchingAppId}
+        isLoadingApps={isLoadingDockApps}
+        onLaunch={(dockApp) => void launchDockApp(dockApp)}
+        onOverlayActiveChange={setIsDockOverlayActive}
+      />
 
       <aside className={`floating-drawer immersive-drawer ${isDrawerOpen ? 'open' : ''}`}>
         <section className="side-section status-panel">
@@ -662,18 +861,18 @@ function App(): React.JSX.Element {
             {restorableCount} restorable windows - {regions.length} regions - {dirtyCount} edits
           </p>
           <p>
-            Live Control is {liveControlEnabled ? 'On: dragging frames moves real windows immediately.' : 'Off: dragging is virtual until Apply Layout.'}
+            {workspaces.length} saved workspaces - {templates.length} saved templates
           </p>
           <p>
             Native Overlay is {overlayModeEnabled ? 'On: InfiniteDesk is layered over real windows.' : 'Off: InfiniteDesk is a normal controller window.'}
           </p>
           <p>
-            Experimental Embed is {experimentalEmbedEnabled ? `On: ${embeddedWindowIds.length} windows embedded.` : 'Off: external windows are not reparented.'}
+            Interactive Control is always on: {embeddedWindowIds.length} windows attached.
           </p>
           <div className="shortcut-list">
             <strong>Workflow</strong>
-            <span>Native Overlay + Live Control is the main path for controlling real Windows windows.</span>
-            <span>Experimental Embed attempts to place real app windows inside process nodes with Win32 SetParent.</span>
+            <span>Native Overlay makes InfiniteDesk a translucent layer above real windows.</span>
+            <span>Interactive Control attaches real app windows inside process nodes for direct click, type, and scroll input.</span>
             <span>Select a region, then launch apps from the Dock to place them there.</span>
             <span>Ctrl+Drag on empty canvas creates a Template Region.</span>
             <span>Drag a region to move its assigned windows together.</span>
@@ -692,6 +891,37 @@ function App(): React.JSX.Element {
 
         <section className="side-section">
           <div className="section-heading">
+            <h2>Interactive Control</h2>
+            <span>{attachedInteractiveWindows.length}</span>
+          </div>
+          <div className="interactive-control-panel">
+            <div className="interactive-control-status">Interactive Control is always on.</div>
+            <button className="secondary-button fill-button danger-inline-action" onClick={() => void detachAllInteractiveWindows()} disabled={attachedInteractiveWindows.length === 0}>
+              Detach All
+            </button>
+            {attachedInteractiveWindows.length === 0 ? (
+              <div className="empty-state">No interactive windows attached.</div>
+            ) : (
+              <div className="interactive-window-list">
+                {attachedInteractiveWindows.map((windowInfo) => (
+                  <article className="interactive-window-card" key={windowInfo.hwnd}>
+                    <div>
+                      <strong>{windowInfo.title}</strong>
+                      <span>{windowInfo.processName}</span>
+                      <em>{windowInfo.note}</em>
+                    </div>
+                    <button title="Detach interactive window" onClick={() => void detachRealWindow(windowInfo.hwnd)}>
+                      Detach
+                    </button>
+                  </article>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section className="side-section">
+          <div className="section-heading">
             <h2>Regions</h2>
             <span>{regions.length}</span>
           </div>
@@ -703,6 +933,40 @@ function App(): React.JSX.Element {
                 <article className={`region-list-item ${selectedRegionId === region.id ? 'active' : ''}`} key={region.id}>
                   <strong>{region.name}</strong>
                   <span>{region.windowIds.length} windows</span>
+                </article>
+              ))
+            )}
+          </div>
+        </section>
+
+        <section className="side-section">
+          <div className="section-heading">
+            <h2>Workspaces</h2>
+            <span>{workspaces.length}</span>
+          </div>
+          <div className="template-list">
+            {workspaces.length === 0 ? (
+              <div className="empty-state">No saved workspaces.</div>
+            ) : (
+              workspaces.map((workspace) => (
+                <article className="template-card" key={workspace.id}>
+                  <div>
+                    <h3>{workspace.name}</h3>
+                    <p>
+                      {workspace.windows.length} windows - {workspace.regions.length} regions
+                    </p>
+                  </div>
+                  <div className="template-actions">
+                    <button title="Load workspace on canvas" onClick={() => previewWorkspaceOnCanvas(workspace)}>
+                      <Eye size={16} />
+                    </button>
+                    <button title="Restore workspace" onClick={() => void restoreWorkspace(workspace)}>
+                      <Undo2 size={16} />
+                    </button>
+                    <button title="Delete workspace" onClick={() => void deleteWorkspace(workspace)}>
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
                 </article>
               ))
             )}

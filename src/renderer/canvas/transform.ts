@@ -4,10 +4,23 @@ export type CanvasTransform = {
   scale: number;
 };
 
+export type CanvasSafeArea = {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+};
+
 export const MIN_CANVAS_SCALE = 0.01;
 export const MAX_CANVAS_SCALE = 2.5;
 const DEFAULT_CANVAS_SCALE = 0.2;
 const MAX_FIT_SCALE = 0.25;
+const EMPTY_SAFE_AREA: CanvasSafeArea = {
+  left: 0,
+  top: 0,
+  right: 0,
+  bottom: 0
+};
 
 export function clampScale(scale: number): number {
   return Math.min(MAX_CANVAS_SCALE, Math.max(MIN_CANVAS_SCALE, scale));
@@ -31,28 +44,34 @@ export function fitViewToBounds(
   bounds: { x: number; y: number; width: number; height: number },
   containerWidth: number,
   containerHeight: number,
-  padding = 240
+  padding = 240,
+  safeArea: CanvasSafeArea = EMPTY_SAFE_AREA
 ): CanvasTransform {
-  const availableWidth = Math.max(1, containerWidth - padding * 2);
-  const availableHeight = Math.max(1, containerHeight - padding * 2);
+  const safeWidth = Math.max(1, containerWidth - safeArea.left - safeArea.right);
+  const safeHeight = Math.max(1, containerHeight - safeArea.top - safeArea.bottom);
+  const availableWidth = Math.max(1, safeWidth - padding * 2);
+  const availableHeight = Math.max(1, safeHeight - padding * 2);
   const nextScale = clampScale(Math.min(availableWidth / Math.max(1, bounds.width), availableHeight / Math.max(1, bounds.height), MAX_FIT_SCALE));
+  const safeCenterX = safeArea.left + safeWidth / 2;
+  const safeCenterY = safeArea.top + safeHeight / 2;
 
   return {
     scale: nextScale,
-    offsetX: containerWidth / 2 - (bounds.x + bounds.width / 2) * nextScale,
-    offsetY: containerHeight / 2 - (bounds.y + bounds.height / 2) * nextScale
+    offsetX: safeCenterX - (bounds.x + bounds.width / 2) * nextScale,
+    offsetY: safeCenterY - (bounds.y + bounds.height / 2) * nextScale
   };
 }
 
 export function fitViewToWindows(
   windows: Array<{ virtualX: number; virtualY: number; width: number; height: number }>,
   containerWidth: number,
-  containerHeight: number
+  containerHeight: number,
+  safeArea: CanvasSafeArea = EMPTY_SAFE_AREA
 ): CanvasTransform {
   if (windows.length === 0) {
     return {
-      offsetX: 120,
-      offsetY: 96,
+      offsetX: Math.max(120, safeArea.left + 40),
+      offsetY: Math.max(96, safeArea.top + 32),
       scale: DEFAULT_CANVAS_SCALE
     };
   }
@@ -70,6 +89,8 @@ export function fitViewToWindows(
       height: maxY - minY
     },
     containerWidth,
-    containerHeight
+    containerHeight,
+    undefined,
+    safeArea
   );
 }

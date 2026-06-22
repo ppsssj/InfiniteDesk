@@ -64,68 +64,55 @@ export function getVirtualWindowBounds(windows: VirtualWindowState[]): { x: numb
   };
 }
 
-function windowsOverlap(a: VirtualWindowState, b: VirtualWindowState): boolean {
-  return !(
-    a.virtualX + a.width < b.virtualX ||
-    b.virtualX + b.width < a.virtualX ||
-    a.virtualY + a.height < b.virtualY ||
-    b.virtualY + b.height < a.virtualY
-  );
-}
-
 export function createInitialVirtualLayout(windows: DetectedWindow[]): VirtualWindowState[] {
-  const initialWindows = toVirtualWindows(windows).sort((a, b) => {
-    if (a.realY === b.realY) {
-      return a.realX - b.realX;
-    }
+  const initialWindows = toVirtualWindows(windows)
+    .filter((windowInfo) => !windowInfo.isHelper)
+    .sort((a, b) => {
+      if (a.realY === b.realY) {
+        return a.realX - b.realX;
+      }
 
-    return a.realY - b.realY;
-  });
+      return a.realY - b.realY;
+    });
 
   if (initialWindows.length === 0) {
     return [];
   }
 
-  const minRealX = Math.min(...initialWindows.map((windowInfo) => windowInfo.realX));
-  const minRealY = Math.min(...initialWindows.map((windowInfo) => windowInfo.realY));
   const originX = 120;
   const originY = 120;
-  const overlapStep = 72;
-
-  return initialWindows.reduce<VirtualWindowState[]>((placed, windowInfo, index) => {
-    let virtualX = windowInfo.realX - minRealX + originX;
-    let virtualY = windowInfo.realY - minRealY + originY;
-    let candidate: VirtualWindowState = {
-      ...windowInfo,
-      virtualX,
-      virtualY
-    };
-
-    let guard = 0;
-    while (placed.some((placedWindow) => windowsOverlap(candidate, placedWindow)) && guard < 12) {
-      virtualX += overlapStep;
-      virtualY += overlapStep;
-      candidate = {
-        ...candidate,
-        virtualX,
-        virtualY
-      };
-      guard++;
-    }
-
-    const normalizedWindow: VirtualWindowState = {
-      ...candidate,
-      initialVirtualX: candidate.virtualX,
-      initialVirtualY: candidate.virtualY,
-      isDirty: false,
-      virtualX: Math.round(candidate.virtualX),
-      virtualY: Math.round(candidate.virtualY)
-    };
-
-    if (index > 0 && placed.length === 0) {
-      return [normalizedWindow];
-    }
-
-    return [...placed, normalizedWindow];
+  const gapX = 260;
+  const gapY = 220;
+  const columnCount = Math.max(1, Math.min(4, Math.ceil(Math.sqrt(initialWindows.length * 1.25))));
+  const rows = Array.from({ length: Math.ceil(initialWindows.length / columnCount) }, (_row, rowIndex) =>
+    initialWindows.slice(rowIndex * columnCount, rowIndex * columnCount + columnCount)
+  );
+  const columnWidths = Array.from({ length: columnCount }, (_column, columnIndex) =>
+    Math.max(0, ...rows.flatMap((row) => (row[columnIndex] ? [row[columnIndex].width] : [])))
+  );
+  const rowHeights = rows.map((row) => Math.max(...row.map((windowInfo) => windowInfo.height)));
+  const columnOffsets = columnWidths.reduce<number[]>((offsets, width, index) => {
+    const previousOffset = offsets[index - 1] ?? originX;
+    const previousWidth = columnWidths[index - 1] ?? 0;
+    return [...offsets, index === 0 ? originX : previousOffset + previousWidth + gapX];
   }, []);
+
+  let rowOffset = originY;
+  return rows.flatMap((row, rowIndex) => {
+    const placed = row.map((windowInfo, columnIndex) => {
+      const virtualX = Math.round(columnOffsets[columnIndex] + (columnWidths[columnIndex] - windowInfo.width) / 2);
+      const virtualY = Math.round(rowOffset + (rowHeights[rowIndex] - windowInfo.height) / 2);
+
+      return {
+        ...windowInfo,
+        virtualX,
+        virtualY,
+        initialVirtualX: virtualX,
+        initialVirtualY: virtualY,
+        isDirty: false
+      };
+    });
+    rowOffset += rowHeights[rowIndex] + gapY;
+    return placed;
+  });
 }

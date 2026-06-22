@@ -1,8 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Focus, Maximize2, Minimize2, RotateCcw, X } from 'lucide-react';
-import { fitViewToWindows, clampScale, screenToWorld, worldToScreen, type CanvasTransform } from '../canvas/transform';
+import { fitViewToWindows, clampScale, screenToWorld, worldToScreen, type CanvasSafeArea, type CanvasTransform } from '../canvas/transform';
 import { getWindowIdentity, updateRegionMembership } from '../canvas/regions';
-import { getVirtualWindowBounds } from '../canvas/windows';
 import type { DwmPreviewWindow, MoveEmbeddedWindowParams, WindowCommand } from '../../shared/types';
 import type { TemplateRegion, VirtualWindowState } from '../canvas/types';
 
@@ -10,14 +9,13 @@ type CanvasPreviewProps = {
   windows: VirtualWindowState[];
   regions: TemplateRegion[];
   previewLabel: string;
+  safeArea: CanvasSafeArea;
+  uiOverlayActive: boolean;
   selectedRegionId: string | null;
-  liveControlEnabled: boolean;
-  experimentalEmbedEnabled: boolean;
   embeddedWindowIds: string[];
   onWindowsChange: (windows: VirtualWindowState[]) => void;
   onRegionsChange: (regions: TemplateRegion[]) => void;
   onSelectRegion: (regionId: string | null) => void;
-  onLiveMoveWindow: (windowInfo: VirtualWindowState) => void;
   onWorkWindow: (hwnd: string) => void;
   onWindowCommand: (hwnd: string, command: WindowCommand) => void;
   onEmbedWindow: (windowInfo: VirtualWindowState, bounds: MoveEmbeddedWindowParams) => void;
@@ -46,7 +44,6 @@ const MIN_REGION_HEIGHT = 140;
 const DEFAULT_REGION_WIDTH = 420;
 const DEFAULT_REGION_HEIGHT = 280;
 const REGION_COLORS = ['#2f7666', '#8a3f2f', '#6f5520', '#4d6793', '#7a5b8f'];
-const LIVE_MOVE_THROTTLE_MS = 40;
 const EMBEDDED_MOVE_THROTTLE_MS = 50;
 const EMBEDDED_NODE_CHROME_WIDTH = 16;
 const EMBEDDED_NODE_CHROME_HEIGHT = 54;
@@ -54,9 +51,14 @@ const EMBEDDED_NODE_CONTENT_INSET_X = 8;
 const EMBEDDED_NODE_CONTENT_INSET_TOP = 46;
 const EMBEDDED_NODE_CONTENT_INSET_BOTTOM = 8;
 const NATIVE_EMBEDDED_VISIBLE_SCALE = 0.65;
+const INTERACTIVE_EMBED_SCALE = 0.78;
 const HIDDEN_EMBEDDED_WINDOW_X = -30000;
 const HIDDEN_EMBEDDED_WINDOW_Y = -30000;
 const DWM_PREVIEW_SYNC_DELAY_MS = 50;
+const OVERVIEW_TITLEBAR_HEIGHT = 38;
+const OVERVIEW_CONTENT_INSET = 10;
+const MIN_OVERVIEW_CONTENT_WIDTH = 160;
+const MIN_OVERVIEW_CONTENT_HEIGHT = 92;
 
 type PanDrag = {
   type: 'pan';
@@ -96,6 +98,13 @@ type ContextMenuState =
   | { type: 'canvas'; screenX: number; screenY: number; worldX: number; worldY: number }
   | { type: 'window'; screenX: number; screenY: number; key: string }
   | { type: 'region'; screenX: number; screenY: number; id: string };
+
+type ScreenRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
 
 function getWindowKey(windowInfo: VirtualWindowState, index: number): string {
   return windowInfo.hwnd || `${windowInfo.processName}-${windowInfo.title}-${index}`;
@@ -186,14 +195,13 @@ export function CanvasPreview({
   windows,
   regions,
   previewLabel,
+  safeArea,
+  uiOverlayActive,
   selectedRegionId,
-  liveControlEnabled,
-  experimentalEmbedEnabled,
   embeddedWindowIds,
   onWindowsChange,
   onRegionsChange,
   onSelectRegion,
-  onLiveMoveWindow,
   onWorkWindow,
   onWindowCommand,
   onEmbedWindow,
@@ -215,15 +223,22 @@ export function CanvasPreview({
   const dragRef = useRef<PanDrag | CreateRegionDrag | WindowDrag | RegionDrag | null>(null);
   const windowsRef = useRef(windows);
   const regionsRef = useRef(regions);
-  const liveMoveRef = useRef<Record<string, { lastMoveAt: number; timeoutId: number | null }>>({});
   const embeddedMoveRef = useRef<Record<string, { lastMoveAt: number; timeoutId: number | null; latest: MoveEmbeddedWindowParams | null }>>({});
   const [transform, setTransformState] = useState<CanvasTransform>(DEFAULT_TRANSFORM);
   const [dragMode, setDragMode] = useState<'none' | 'pan' | 'window' | 'region' | 'create-region'>('none');
   const [draftRegion, setDraftRegion] = useState<TemplateRegion | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [viewportVersion, setViewportVersion] = useState(0);
-  const bounds = useMemo(() => getVirtualWindowBounds(windows), [windows]);
   const embeddedWindowIdSet = useMemo(() => new Set(embeddedWindowIds), [embeddedWindowIds]);
+  const shouldSuspendNativePreviews = uiOverlayActive || contextMenu !== null;
+
+  function getDefaultTransform(): CanvasTransform {
+    return {
+      ...DEFAULT_TRANSFORM,
+      offsetX: Math.max(DEFAULT_TRANSFORM.offsetX, safeArea.left + 40),
+      offsetY: Math.max(DEFAULT_TRANSFORM.offsetY, safeArea.top + 32)
+    };
+  }
 
   function setTransform(next: CanvasTransform | ((current: CanvasTransform) => CanvasTransform)): void {
     setTransformState((current) => {
@@ -246,11 +261,6 @@ export function CanvasPreview({
 
   useEffect(() => {
     return () => {
-      Object.values(liveMoveRef.current).forEach((item) => {
-        if (item.timeoutId !== null) {
-          window.clearTimeout(item.timeoutId);
-        }
-      });
       Object.values(embeddedMoveRef.current).forEach((item) => {
         if (item.timeoutId !== null) {
           window.clearTimeout(item.timeoutId);
@@ -275,48 +285,8 @@ export function CanvasPreview({
     };
   }, []);
 
-  function scheduleLiveMove(windowInfo: VirtualWindowState): void {
-    if (!liveControlEnabled || !windowInfo.hwnd) {
-      return;
-    }
-
-    const key = windowInfo.hwnd;
-    const now = window.performance.now();
-    const existing = liveMoveRef.current[key] || { lastMoveAt: 0, timeoutId: null };
-    const elapsed = now - existing.lastMoveAt;
-
-    if (elapsed >= LIVE_MOVE_THROTTLE_MS) {
-      if (existing.timeoutId !== null) {
-        window.clearTimeout(existing.timeoutId);
-      }
-      liveMoveRef.current[key] = {
-        lastMoveAt: now,
-        timeoutId: null
-      };
-      onLiveMoveWindow(windowInfo);
-      return;
-    }
-
-    if (existing.timeoutId !== null) {
-      window.clearTimeout(existing.timeoutId);
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      liveMoveRef.current[key] = {
-        lastMoveAt: window.performance.now(),
-        timeoutId: null
-      };
-      onLiveMoveWindow(windowInfo);
-    }, LIVE_MOVE_THROTTLE_MS - elapsed);
-
-    liveMoveRef.current[key] = {
-      ...existing,
-      timeoutId
-    };
-  }
-
   function scheduleEmbeddedMove(params: MoveEmbeddedWindowParams, immediate = false): void {
-    if (!params.hwnd || (!experimentalEmbedEnabled && !embeddedWindowIdSet.has(params.hwnd))) {
+    if (!params.hwnd) {
       return;
     }
 
@@ -362,12 +332,12 @@ export function CanvasPreview({
   function fitView(): void {
     const canvas = canvasRef.current;
     if (!canvas) {
-      setTransform(DEFAULT_TRANSFORM);
+      setTransform(getDefaultTransform());
       return;
     }
 
     const rect = canvas.getBoundingClientRect();
-    setTransform(fitViewToWindows(windows, rect.width, rect.height));
+    setTransform(fitViewToWindows(windows, rect.width, rect.height, safeArea));
   }
 
   function zoomBy(multiplier: number): void {
@@ -394,13 +364,70 @@ export function CanvasPreview({
     return forceEmbedded || Boolean(windowInfo.hwnd && embeddedWindowIdSet.has(windowInfo.hwnd));
   }
 
-  function shouldShowNativeEmbeddedWindow(windowInfo: VirtualWindowState, forceEmbedded = false): boolean {
-    return isEmbeddedWindow(windowInfo, forceEmbedded) && transform.scale >= NATIVE_EMBEDDED_VISIBLE_SCALE;
+  function shouldShowNativeEmbeddedWindow(
+    windowInfo: VirtualWindowState,
+    forceEmbedded = false,
+    targetTransform: CanvasTransform = transform
+  ): boolean {
+    return (
+      (forceEmbedded || !shouldSuspendNativePreviews) &&
+      isEmbeddedWindow(windowInfo, forceEmbedded) &&
+      targetTransform.scale >= NATIVE_EMBEDDED_VISIBLE_SCALE
+    );
   }
 
-  function getFrameScreenBounds(windowInfo: VirtualWindowState, forceEmbedded = false): { x: number; y: number; width: number; height: number } {
-    const position = worldToScreen(windowInfo.virtualX, windowInfo.virtualY, transform);
-    if (shouldShowNativeEmbeddedWindow(windowInfo, forceEmbedded)) {
+  function rectsIntersect(a: ScreenRect, b: ScreenRect): boolean {
+    return !(
+      a.x + a.width <= b.x ||
+      b.x + b.width <= a.x ||
+      a.y + a.height <= b.y ||
+      b.y + b.height <= a.y
+    );
+  }
+
+  function getProtectedUiRects(): ScreenRect[] {
+    const canvas = canvasRef.current;
+    const canvasWidth = canvas?.clientWidth || window.innerWidth;
+    const canvasHeight = canvas?.clientHeight || window.innerHeight;
+    const hasDrawer = safeArea.right > 300;
+
+    return [
+      { x: 0, y: 0, width: 280, height: 220 },
+      { x: Math.max(0, canvasWidth - 280), y: 0, width: 280, height: 120 },
+      { x: 0, y: Math.max(0, canvasHeight - 140), width: canvasWidth, height: 140 },
+      ...(hasDrawer ? [{ x: Math.max(0, canvasWidth - 390), y: 0, width: 390, height: canvasHeight }] : [])
+    ];
+  }
+
+  function intersectsProtectedUi(rect: ScreenRect): boolean {
+    return getProtectedUiRects().some((protectedRect) => rectsIntersect(rect, protectedRect));
+  }
+
+  function getAspectPreservingOverviewContentSize(
+    windowInfo: VirtualWindowState,
+    targetTransform: CanvasTransform = transform
+  ): { width: number; height: number } {
+    const sourceWidth = Math.max(1, windowInfo.width);
+    const sourceHeight = Math.max(1, windowInfo.height);
+    const previewScale = Math.max(
+      targetTransform.scale,
+      MIN_OVERVIEW_CONTENT_WIDTH / sourceWidth,
+      MIN_OVERVIEW_CONTENT_HEIGHT / sourceHeight
+    );
+
+    return {
+      width: Math.round(sourceWidth * previewScale),
+      height: Math.round(sourceHeight * previewScale)
+    };
+  }
+
+  function getFrameScreenBounds(
+    windowInfo: VirtualWindowState,
+    forceEmbedded = false,
+    targetTransform: CanvasTransform = transform
+  ): { x: number; y: number; width: number; height: number } {
+    const position = worldToScreen(windowInfo.virtualX, windowInfo.virtualY, targetTransform);
+    if (shouldShowNativeEmbeddedWindow(windowInfo, forceEmbedded, targetTransform)) {
       const contentWidth = Math.max(1, windowInfo.width);
       const contentHeight = Math.max(1, windowInfo.height);
       return {
@@ -411,17 +438,35 @@ export function CanvasPreview({
       };
     }
 
+    const contentSize = getAspectPreservingOverviewContentSize(windowInfo, targetTransform);
+
     return {
       x: position.x,
       y: position.y,
-      width: Math.max(180, windowInfo.width * transform.scale),
-      height: Math.max(130, windowInfo.height * transform.scale)
+      width: contentSize.width + OVERVIEW_CONTENT_INSET * 2,
+      height: contentSize.height + OVERVIEW_TITLEBAR_HEIGHT + OVERVIEW_CONTENT_INSET * 2
     };
   }
 
-  function getEmbeddedContentBounds(windowInfo: VirtualWindowState, forceEmbedded = false): MoveEmbeddedWindowParams {
-    const frame = getFrameScreenBounds(windowInfo, forceEmbedded);
-    if (!shouldShowNativeEmbeddedWindow(windowInfo, forceEmbedded)) {
+  function getOverviewContentScreenBounds(windowInfo: VirtualWindowState): { x: number; y: number; width: number; height: number } {
+    const frame = getFrameScreenBounds(windowInfo);
+    const contentSize = getAspectPreservingOverviewContentSize(windowInfo);
+
+    return {
+      x: frame.x + OVERVIEW_CONTENT_INSET,
+      y: frame.y + OVERVIEW_TITLEBAR_HEIGHT + OVERVIEW_CONTENT_INSET,
+      width: contentSize.width,
+      height: contentSize.height
+    };
+  }
+
+  function getEmbeddedContentBounds(
+    windowInfo: VirtualWindowState,
+    forceEmbedded = false,
+    targetTransform: CanvasTransform = transform
+  ): MoveEmbeddedWindowParams {
+    const frame = getFrameScreenBounds(windowInfo, forceEmbedded, targetTransform);
+    if (!shouldShowNativeEmbeddedWindow(windowInfo, forceEmbedded, targetTransform) || intersectsProtectedUi(frame)) {
       return {
         hwnd: windowInfo.hwnd || '',
         x: HIDDEN_EMBEDDED_WINDOW_X,
@@ -440,30 +485,64 @@ export function CanvasPreview({
     };
   }
 
+  function getInteractiveEmbedTransform(windowInfo: VirtualWindowState): CanvasTransform {
+    const scale = Math.max(transform.scale, INTERACTIVE_EMBED_SCALE);
+    const safeWidth = Math.max(1, (canvasRef.current?.clientWidth || window.innerWidth) - safeArea.left - safeArea.right);
+    const safeHeight = Math.max(1, (canvasRef.current?.clientHeight || window.innerHeight) - safeArea.top - safeArea.bottom);
+    const safeCenterX = safeArea.left + safeWidth / 2;
+    const safeCenterY = safeArea.top + safeHeight / 2;
+    const frameWidth = Math.max(1, windowInfo.width) + EMBEDDED_NODE_CHROME_WIDTH;
+    const frameHeight = Math.max(1, windowInfo.height) + EMBEDDED_NODE_CHROME_HEIGHT;
+
+    return {
+      scale,
+      offsetX: Math.round(safeCenterX - frameWidth / 2 - windowInfo.virtualX * scale),
+      offsetY: Math.round(safeCenterY - frameHeight / 2 - windowInfo.virtualY * scale)
+    };
+  }
+
+  function zoomToWindowNode(windowInfo: VirtualWindowState): void {
+    const canvas = canvasRef.current;
+    const canvasWidth = canvas?.clientWidth || window.innerWidth;
+    const canvasHeight = canvas?.clientHeight || window.innerHeight;
+    const safeWidth = Math.max(1, canvasWidth - safeArea.left - safeArea.right);
+    const safeHeight = Math.max(1, canvasHeight - safeArea.top - safeArea.bottom);
+    const safeCenterX = safeArea.left + safeWidth / 2;
+    const safeCenterY = safeArea.top + safeHeight / 2;
+    const nextScale = clampScale(Math.min(1.35, Math.max(0.72, transform.scale * 1.55)));
+
+    setTransform({
+      scale: nextScale,
+      offsetX: Math.round(safeCenterX - (windowInfo.virtualX + windowInfo.width / 2) * nextScale),
+      offsetY: Math.round(safeCenterY - (windowInfo.virtualY + windowInfo.height / 2) * nextScale)
+    });
+  }
+
   function getDwmPreviewWindow(windowInfo: VirtualWindowState): DwmPreviewWindow | null {
     if (!windowInfo.hwnd || shouldShowNativeEmbeddedWindow(windowInfo)) {
       return null;
     }
 
-    const frame = getFrameScreenBounds(windowInfo);
+    const previewBounds = getOverviewContentScreenBounds(windowInfo);
     const canvas = canvasRef.current;
     const canvasWidth = canvas?.clientWidth || 0;
     const canvasHeight = canvas?.clientHeight || 0;
-    const titlebarHeight = 38;
-    const inset = 10;
-    const previewX = frame.x + inset;
-    const previewY = frame.y + titlebarHeight + inset;
-    const previewWidth = frame.width - inset * 2;
-    const previewHeight = frame.height - titlebarHeight - inset * 2;
 
-    if (previewWidth <= 20 || previewHeight <= 20) {
+    if (previewBounds.width <= 20 || previewBounds.height <= 20) {
+      return null;
+    }
+
+    if (intersectsProtectedUi(previewBounds)) {
       return null;
     }
 
     if (
       canvasWidth > 0 &&
       canvasHeight > 0 &&
-      (previewX < 0 || previewY < 0 || previewX + previewWidth > canvasWidth || previewY + previewHeight > canvasHeight)
+      (previewBounds.x < 0 ||
+        previewBounds.y < 0 ||
+        previewBounds.x + previewBounds.width > canvasWidth ||
+        previewBounds.y + previewBounds.height > canvasHeight)
     ) {
       return null;
     }
@@ -471,10 +550,10 @@ export function CanvasPreview({
     return {
       id: windowInfo.hwnd,
       hwnd: windowInfo.hwnd,
-      x: Math.round(previewX),
-      y: Math.round(previewY),
-      width: Math.max(1, Math.round(previewWidth)),
-      height: Math.max(1, Math.round(previewHeight)),
+      x: Math.round(previewBounds.x),
+      y: Math.round(previewBounds.y),
+      width: Math.max(1, Math.round(previewBounds.width)),
+      height: Math.max(1, Math.round(previewBounds.height)),
       visible: true,
       opacity: 245
     };
@@ -499,7 +578,7 @@ export function CanvasPreview({
   }, [fitSignal]);
 
   useEffect(() => {
-    setTransform(DEFAULT_TRANSFORM);
+    setTransform(getDefaultTransform());
   }, [resetViewSignal]);
 
   useEffect(() => {
@@ -526,16 +605,28 @@ export function CanvasPreview({
 
       scheduleEmbeddedMove(getEmbeddedContentBounds(windowInfo));
     });
-  }, [embeddedWindowIdSet, embeddedWindowIds.length, transform, windows]);
+  }, [embeddedWindowIdSet, embeddedWindowIds.length, shouldSuspendNativePreviews, safeArea, transform, windows]);
+
+  useEffect(() => {
+    if (shouldSuspendNativePreviews) {
+      onClearDwmPreviews();
+      flushEmbeddedWindowPositions();
+    }
+  }, [shouldSuspendNativePreviews]);
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
+      if (shouldSuspendNativePreviews) {
+        onClearDwmPreviews();
+        return;
+      }
+
       const previews = windows.map((windowInfo) => getDwmPreviewWindow(windowInfo)).filter((preview): preview is DwmPreviewWindow => preview !== null);
       onSyncDwmPreviews(previews);
     }, DWM_PREVIEW_SYNC_DELAY_MS);
 
     return () => window.clearTimeout(timeoutId);
-  }, [embeddedWindowIdSet, transform, viewportVersion, windows]);
+  }, [embeddedWindowIdSet, shouldSuspendNativePreviews, transform, viewportVersion, windows]);
 
   useEffect(() => {
     return () => {
@@ -730,26 +821,21 @@ export function CanvasPreview({
     const deltaY = (event.clientY - drag.startY) / transform.scale;
 
     if (drag.type === 'window') {
-      let movedWindow: VirtualWindowState | null = null;
       drag.moved = Math.abs(deltaX) > 2 || Math.abs(deltaY) > 2;
       const nextWindows = windowsRef.current.map((windowInfo, index) => {
         if (getWindowKey(windowInfo, index) !== drag.key) {
           return windowInfo;
         }
 
-        movedWindow = {
+        return {
           ...windowInfo,
           virtualX: Math.round(drag.virtualX + deltaX),
           virtualY: Math.round(drag.virtualY + deltaY),
           isDirty: true
         };
-        return movedWindow;
       });
       windowsRef.current = nextWindows;
       onWindowsChange(nextWindows);
-      if (movedWindow) {
-        scheduleLiveMove(movedWindow);
-      }
       return;
     }
 
@@ -803,13 +889,6 @@ export function CanvasPreview({
     } else if (drag?.type === 'window' || drag?.type === 'region') {
       onRegionsChange(updateRegionMembership(windowsRef.current, regionsRef.current));
       flushEmbeddedWindowPositions();
-    }
-
-    if (drag?.type === 'window' && !drag.moved && liveControlEnabled) {
-      const targetWindow = windowsRef.current.find((windowInfo, index) => getWindowKey(windowInfo, index) === drag.key);
-      if (targetWindow?.hwnd) {
-        onWorkWindow(targetWindow.hwnd);
-      }
     }
 
     dragRef.current = null;
@@ -914,7 +993,9 @@ export function CanvasPreview({
       return;
     }
 
-    onEmbedWindow(windowInfo, getEmbeddedContentBounds(windowInfo, true));
+    const interactiveTransform = getInteractiveEmbedTransform(windowInfo);
+    setTransform(interactiveTransform);
+    onEmbedWindow(windowInfo, getEmbeddedContentBounds(windowInfo, true, interactiveTransform));
   }
 
   function detachEmbeddedWindow(windowInfo: VirtualWindowState): void {
@@ -944,18 +1025,6 @@ export function CanvasPreview({
         onWheel={handleWheel}
         onContextMenu={handleCanvasContextMenu}
       >
-        {bounds ? (
-          <div
-            className="canvas-bounds"
-            style={{
-              left: worldToScreen(bounds.x, bounds.y, transform).x,
-              top: worldToScreen(bounds.x, bounds.y, transform).y,
-              width: bounds.width * transform.scale,
-              height: bounds.height * transform.scale
-            }}
-          />
-        ) : null}
-
         {renderedRegions.map((region) => {
           const position = worldToScreen(region.x, region.y, transform);
           return (
@@ -1025,6 +1094,13 @@ export function CanvasPreview({
                   height: frame.height
                 }}
                 onPointerDown={(event) => handleWindowPointerDown(event, windowInfo, key)}
+                onDoubleClick={(event) => {
+                  if ((event.target as HTMLElement).closest('button')) {
+                    return;
+                  }
+                  event.stopPropagation();
+                  zoomToWindowNode(windowInfo);
+                }}
                 onContextMenu={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
@@ -1048,20 +1124,18 @@ export function CanvasPreview({
                   </div>
                   <div className="virtual-window-actions" onPointerDown={(event) => event.stopPropagation()}>
                     {windowInfo.isDirty ? <em>Edited</em> : null}
-                    {isEmbedded && !isNativeEmbeddedVisible ? <em>Overview</em> : null}
+                    {isEmbedded && !isNativeEmbeddedVisible ? <em>Zoom In</em> : null}
                     {windowInfo.hwnd ? (
                       <>
-                        {experimentalEmbedEnabled || isEmbedded ? (
-                          isEmbedded ? (
-                            <button className="embed-window-command" title="Detach embedded real window" onClick={() => detachEmbeddedWindow(windowInfo)}>
-                              Detach
-                            </button>
-                          ) : (
-                            <button className="embed-window-command" title="Embed real window into this node" onClick={() => embedWindow(windowInfo)}>
-                              Embed
-                            </button>
-                          )
-                        ) : null}
+                        {isEmbedded ? (
+                          <button className="embed-window-command" title="Detach interactive real window" onClick={() => detachEmbeddedWindow(windowInfo)}>
+                            Detach
+                          </button>
+                        ) : (
+                          <button className="embed-window-command" title="Interact with the real app inside this node" onClick={() => embedWindow(windowInfo)}>
+                            Interact
+                          </button>
+                        )}
                         <button className="work-window-command" title="Work in real window" onClick={() => workInWindow(windowInfo)}>
                           Work
                         </button>
@@ -1115,7 +1189,7 @@ export function CanvasPreview({
                 <button onClick={() => { createRegionAt(contextMenu.worldX, contextMenu.worldY); setContextMenu(null); }}>Create Region Here</button>
                 <button onClick={() => { setContextMenu(null); onSaveRegions(); }}>Save Regions</button>
                 <button onClick={() => { setContextMenu(null); fitView(); }}>Fit View</button>
-                <button onClick={() => { setContextMenu(null); setTransform(DEFAULT_TRANSFORM); }}>Reset View</button>
+                <button onClick={() => { setContextMenu(null); setTransform(getDefaultTransform()); }}>Reset View</button>
               </>
             ) : null}
 
@@ -1123,13 +1197,11 @@ export function CanvasPreview({
               <>
                 {contextWindow.hwnd ? (
                   <>
-                    {experimentalEmbedEnabled || embeddedWindowIdSet.has(contextWindow.hwnd) ? (
-                      embeddedWindowIdSet.has(contextWindow.hwnd) ? (
-                        <button onClick={() => { setContextMenu(null); detachEmbeddedWindow(contextWindow); }}>Detach Embedded Window</button>
-                      ) : (
-                        <button onClick={() => { setContextMenu(null); embedWindow(contextWindow); }}>Embed Real Window</button>
-                      )
-                    ) : null}
+                    {embeddedWindowIdSet.has(contextWindow.hwnd) ? (
+                      <button onClick={() => { setContextMenu(null); detachEmbeddedWindow(contextWindow); }}>Detach Interactive Window</button>
+                    ) : (
+                      <button onClick={() => { setContextMenu(null); embedWindow(contextWindow); }}>Interact Inside Node</button>
+                    )}
                     <button onClick={() => { setContextMenu(null); workInWindow(contextWindow); }}>Work in Real Window</button>
                     <button onClick={() => { setContextMenu(null); runWindowCommand(contextWindow, 'focus'); }}>Focus Real Window</button>
                     <button onClick={() => { setContextMenu(null); runWindowCommand(contextWindow, 'minimize'); }}>Minimize Real Window</button>

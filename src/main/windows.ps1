@@ -69,6 +69,12 @@ public class WinApi {
   public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
 
   [DllImport("user32.dll")]
+  public static extern int GetSystemMetrics(int nIndex);
+
+  [DllImport("dwmapi.dll")]
+  public static extern int DwmGetWindowAttribute(IntPtr hWnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
+
+  [DllImport("user32.dll")]
   public static extern bool IsIconic(IntPtr hWnd);
 
   [DllImport("user32.dll")]
@@ -166,6 +172,58 @@ function Convert-StringToInt64 {
   return [Convert]::ToInt64($Value, 10)
 }
 
+function Get-VisibleWindowRect {
+  param([IntPtr]$Handle)
+
+  $DWMWA_EXTENDED_FRAME_BOUNDS = 9
+  $dwmRect = New-Object WinApi+RECT
+  $dwmResult = [WinApi]::DwmGetWindowAttribute($Handle, $DWMWA_EXTENDED_FRAME_BOUNDS, [ref]$dwmRect, 16)
+  $dwmWidth = $dwmRect.Right - $dwmRect.Left
+  $dwmHeight = $dwmRect.Bottom - $dwmRect.Top
+  if ($dwmResult -eq 0 -and $dwmWidth -gt 0 -and $dwmHeight -gt 0) {
+    return $dwmRect
+  }
+
+  $rect = New-Object WinApi+RECT
+  if ([WinApi]::GetWindowRect($Handle, [ref]$rect)) {
+    return $rect
+  }
+
+  return $null
+}
+
+function Get-VirtualScreenRect {
+  $SM_XVIRTUALSCREEN = 76
+  $SM_YVIRTUALSCREEN = 77
+  $SM_CXVIRTUALSCREEN = 78
+  $SM_CYVIRTUALSCREEN = 79
+  $left = [WinApi]::GetSystemMetrics($SM_XVIRTUALSCREEN)
+  $top = [WinApi]::GetSystemMetrics($SM_YVIRTUALSCREEN)
+  $width = [WinApi]::GetSystemMetrics($SM_CXVIRTUALSCREEN)
+  $height = [WinApi]::GetSystemMetrics($SM_CYVIRTUALSCREEN)
+
+  return [pscustomobject]@{
+    Left = $left
+    Top = $top
+    Right = $left + $width
+    Bottom = $top + $height
+  }
+}
+
+function Test-RectIntersectsVirtualScreen {
+  param(
+    [WinApi+RECT]$Rect,
+    [object]$VirtualScreen
+  )
+
+  return -not (
+    $Rect.Right -le $VirtualScreen.Left -or
+    $Rect.Left -ge $VirtualScreen.Right -or
+    $Rect.Bottom -le $VirtualScreen.Top -or
+    $Rect.Top -ge $VirtualScreen.Bottom
+  )
+}
+
 function Get-WindowTitleByHandle {
   param([IntPtr]$Handle)
 
@@ -204,6 +262,7 @@ function Get-OpenWindows {
   $windows = New-Object System.Collections.Generic.List[object]
   $ignoredClasses = @("Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Windows.UI.Core.CoreWindow")
   $ignoredProcesses = @("TextInputHost")
+  $virtualScreen = Get-VirtualScreenRect
 
   [WinApi]::EnumWindows({
     param([IntPtr]$hWnd, [IntPtr]$lParam)
@@ -231,8 +290,8 @@ function Get-OpenWindows {
       return $true
     }
 
-    $rect = New-Object WinApi+RECT
-    if (-not [WinApi]::GetWindowRect($hWnd, [ref]$rect)) {
+    $rect = Get-VisibleWindowRect $hWnd
+    if ($null -eq $rect) {
       return $true
     }
 
@@ -257,16 +316,20 @@ function Get-OpenWindows {
       return $true
     }
 
-    $hasInvalidMinimizedBounds = $isMinimized -and ($rawX -le -30000 -or $rawY -le -30000)
+    $isOutsideVirtualScreen = -not (Test-RectIntersectsVirtualScreen $rect $virtualScreen)
+    $hasInvalidMinimizedBounds = $isMinimized -and $isOutsideVirtualScreen
+    $isOffscreenHidden = -not $isMinimized -and $isOutsideVirtualScreen
     $isInternal = $processName -eq "electron" -and $title -like "*InfiniteDesk*"
     $isTinyHelper = -not $isMinimized -and -not $isInternal -and ($width -lt 200 -or $height -lt 100)
-    $isRestorable = -not $hasInvalidMinimizedBounds -and -not $isInternal
+    $isRestorable = -not $hasInvalidMinimizedBounds -and -not $isOffscreenHidden -and -not $isInternal
     $statusReason = "Ready"
 
     if ($isInternal) {
       $statusReason = "Internal app"
     } elseif ($hasInvalidMinimizedBounds) {
       $statusReason = "Minimized / position unavailable"
+    } elseif ($isOffscreenHidden) {
+      $statusReason = "Offscreen / hidden"
     } elseif ($isMinimized) {
       $statusReason = "Minimized"
     } elseif ($isTinyHelper) {
@@ -277,14 +340,14 @@ function Get-OpenWindows {
       hwnd = Convert-HwndToString $hWnd
       title = $title
       processName = $processName
-      x = if ($hasInvalidMinimizedBounds) { $null } else { $rawX }
-      y = if ($hasInvalidMinimizedBounds) { $null } else { $rawY }
-      width = if ($hasInvalidMinimizedBounds) { $null } else { $width }
-      height = if ($hasInvalidMinimizedBounds) { $null } else { $height }
+      x = if ($hasInvalidMinimizedBounds -or $isOffscreenHidden) { $null } else { $rawX }
+      y = if ($hasInvalidMinimizedBounds -or $isOffscreenHidden) { $null } else { $rawY }
+      width = if ($hasInvalidMinimizedBounds -or $isOffscreenHidden) { $null } else { $width }
+      height = if ($hasInvalidMinimizedBounds -or $isOffscreenHidden) { $null } else { $height }
       isMinimized = $isMinimized
       isRestorable = $isRestorable
       isInternal = $isInternal
-      isIgnored = $isTinyHelper
+      isIgnored = $isTinyHelper -or $isOffscreenHidden
       statusReason = $statusReason
     })
 
