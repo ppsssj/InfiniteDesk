@@ -9,6 +9,7 @@ It does not replace Windows Explorer or act as a shell. Real applications remain
 ## What Works Now
 
 - Scan visible top-level Windows application windows.
+- Hide compact helper windows that cannot provide a useful process preview.
 - Read HWND, title, process name, bounds, minimized state, and restorable state.
 - Display process nodes on a dark infinite canvas.
 - Show live DWM thumbnail previews inside process nodes.
@@ -22,11 +23,12 @@ It does not replace Windows Explorer or act as a shell. Real applications remain
 - Focus, minimize, maximize, restore, close, and Work in a real window.
 - Launch default pinned apps from the bottom Dock.
 - Use Native Overlay mode as a translucent control layer over the desktop.
-- Use Interactive Control to attach real windows into InfiniteDesk nodes with Win32 `SetParent`.
+- Use Mirror Control to click, drag, right-click, scroll, focus, and type in original app windows through their live InfiniteDesk nodes.
+- Automatically detect new windows and popups opened by Mirror Control and add them beside the source process node.
 
 ## Design Direction
 
-InfiniteDesk is moving toward a Native Overlay + Interactive Control model.
+InfiniteDesk uses a Native Overlay + Mirror Control model.
 
 The main workflow is:
 
@@ -35,7 +37,7 @@ The main workflow is:
 3. Real interaction still happens in the actual Windows application.
 4. InfiniteDesk controls those windows through HWND-based Win32 commands.
 
-DWM thumbnails are useful for overview, but they are not a direct input surface. Interactive Control can make a real application appear inside a node for direct input, though some apps can still behave unpredictably.
+DWM thumbnails provide the live view while Mirror Control maps continuous pointer input back to the original HWND. A pointer press focuses the original application, so subsequent keyboard input goes to that application while InfiniteDesk stays visually above it. The original application window keeps its parent, bounds, and desktop presence.
 
 ## Requirements
 
@@ -101,7 +103,7 @@ Electron Main Process
   |     +-- EnumWindows / GetWindowText / GetWindowRect
   |     +-- MoveWindow / SetWindowPos
   |     +-- ShowWindow / SetForegroundWindow
-  |     +-- SetParent / GetParent for Interactive Control
+  |     +-- Mirrored pointer coordinates / original-window focus
   |
   +-- DWM preview host process
         |
@@ -136,8 +138,8 @@ docs/
 
 ## Current Limitations
 
-- DWM previews are visual only. They do not directly forward mouse or keyboard input.
-- Interactive Control can behave differently across apps and should be treated as app-dependent.
+- Mirror Control forwards continuous pointer messages to the original HWND; application-specific input handling can still vary.
+- Keyboard input uses the original app's focus after pressing inside its preview while InfiniteDesk remains visually above it.
 - Chrome, Edge, VS Code, Electron apps, and elevated/admin windows may reject or behave oddly under native control.
 - Focus commands are limited by Windows foreground restrictions.
 - Multi-monitor layout persistence is not deeply modeled yet.
