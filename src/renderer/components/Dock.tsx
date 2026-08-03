@@ -5,6 +5,7 @@ import type { DockApp } from '../../shared/types';
 type DockProps = {
   apps: DockApp[];
   pinnedApps: DockApp[];
+  statusLabel: string;
   launchingAppId: string | null;
   isLoadingApps: boolean;
   onLaunch: (app: DockApp) => void;
@@ -23,9 +24,10 @@ function AppIcon({ app }: { app: DockApp }): React.JSX.Element {
   return <span>{getAppInitials(app)}</span>;
 }
 
-export function Dock({ apps, pinnedApps, launchingAppId, isLoadingApps, onLaunch, onOverlayActiveChange }: DockProps): React.JSX.Element {
+export function Dock({ apps, pinnedApps, statusLabel, launchingAppId, isLoadingApps, onLaunch, onOverlayActiveChange }: DockProps): React.JSX.Element {
   const [query, setQuery] = React.useState('');
   const [isAllAppsOpen, setIsAllAppsOpen] = React.useState(false);
+  const [isExpanded, setIsExpanded] = React.useState(false);
   const normalizedQuery = query.trim().toLowerCase();
   const searchResults = React.useMemo(() => {
     if (normalizedQuery.length === 0) {
@@ -39,12 +41,29 @@ export function Dock({ apps, pinnedApps, launchingAppId, isLoadingApps, onLaunch
   const shouldShowResults = normalizedQuery.length > 0 || isAllAppsOpen;
 
   React.useEffect(() => {
-    onOverlayActiveChange(shouldShowResults);
+    onOverlayActiveChange(shouldShowResults || isExpanded);
     return () => onOverlayActiveChange(false);
-  }, [onOverlayActiveChange, shouldShowResults]);
+  }, [isExpanded, onOverlayActiveChange, shouldShowResults]);
 
   return (
-    <div className="dock-launcher">
+    <div
+      className={`dock-launcher ${isExpanded ? 'expanded' : ''}`}
+      data-dwm-ui-overlay="true"
+      onMouseEnter={() => setIsExpanded(true)}
+      onMouseLeave={(event) => {
+        if (!event.currentTarget.contains(document.activeElement)) {
+          setIsExpanded(false);
+        }
+      }}
+      onFocusCapture={() => setIsExpanded(true)}
+      onBlurCapture={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setIsExpanded(false);
+        }
+      }}
+    >
+      <div className="dock-reveal-handle" aria-hidden="true" />
+      <div className="dock-status">{statusLabel}</div>
       <div className="dock-search">
         <Search size={15} />
         <input

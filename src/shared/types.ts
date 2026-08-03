@@ -88,6 +88,22 @@ export type WindowCommandResult = {
   error?: string;
 };
 
+export type RelayPointerInput = {
+  hwnd: string;
+  normalizedX: number;
+  normalizedY: number;
+  action: 'down' | 'move' | 'up' | 'cancel' | 'wheel';
+  button?: 'left' | 'right' | 'middle';
+  buttons?: number;
+  wheelDelta?: number;
+};
+
+export type RelayPointerResult = {
+  success: boolean;
+  hwnd: string;
+  error?: string;
+};
+
 export type OverlayModeResult = {
   success: boolean;
   enabled: boolean;
@@ -131,6 +147,10 @@ export type DwmPreviewWindow = {
   y: number;
   width: number;
   height: number;
+  cropX?: number;
+  cropY?: number;
+  cropWidth?: number;
+  cropHeight?: number;
   visible: boolean;
   opacity?: number;
 };

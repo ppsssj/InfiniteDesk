@@ -19,6 +19,8 @@ import type {
   LayoutTemplate,
   MoveEmbeddedWindowParams,
   OverlayModeResult,
+  RelayPointerInput,
+  RelayPointerResult,
   RestoreResult,
   SavedWorkspace,
   WindowCommand,
@@ -31,6 +33,8 @@ let overlayRestoreBounds: Rectangle | null = null;
 const embeddedWindows = new Map<string, Required<Pick<EmbedResult, 'originalParentHwnd' | 'originalStyle' | 'originalExStyle' | 'originalX' | 'originalY' | 'originalWidth' | 'originalHeight'>>>();
 const embeddedMoveQueue = new Map<string, { inFlight: boolean; latest: MoveEmbeddedWindowParams | null }>();
 let dwmPreviewHost: ChildProcessWithoutNullStreams | null = null;
+let dwmPreviewOwner: BrowserWindow | null = null;
+let latestDwmPreviews: DwmPreviewWindow[] = [];
 let isQuittingAfterDetach = false;
 
 app.disableHardwareAcceleration();
@@ -135,6 +139,29 @@ function createWindow(): void {
 
   mainWindow.webContents.on('did-finish-load', () => {
     console.log('[renderer] did-finish-load');
+  });
+
+  const resyncDwmPreviews = (): void => {
+    if (dwmPreviewOwner === mainWindow && latestDwmPreviews.length > 0) {
+      syncDwmPreviewWindows(mainWindow, latestDwmPreviews);
+    }
+  };
+  mainWindow.on('move', resyncDwmPreviews);
+  mainWindow.on('resize', resyncDwmPreviews);
+  mainWindow.on('restore', resyncDwmPreviews);
+  mainWindow.on('show', resyncDwmPreviews);
+  mainWindow.on('minimize', () => {
+    sendDwmPreviewCommand({ action: 'hide' });
+  });
+  mainWindow.on('hide', () => {
+    sendDwmPreviewCommand({ action: 'hide' });
+  });
+  mainWindow.on('closed', () => {
+    if (dwmPreviewOwner === mainWindow) {
+      dwmPreviewOwner = null;
+      latestDwmPreviews = [];
+      sendDwmPreviewCommand({ action: 'clear' });
+    }
   });
 
   if (isDev && process.env.ELECTRON_RENDERER_URL) {
@@ -258,8 +285,36 @@ function ensureDwmPreviewHost(): ChildProcessWithoutNullStreams {
     stdio: ['pipe', 'pipe', 'pipe']
   });
 
-  child.stdout.on('data', () => {
-    // The preview host is command-driven; stdout is intentionally ignored.
+  let stdoutBuffer = '';
+  child.stdout.on('data', (chunk: Buffer) => {
+    stdoutBuffer += chunk.toString('utf8');
+    const lines = stdoutBuffer.split(/\r?\n/);
+    stdoutBuffer = lines.pop() || '';
+    for (const line of lines) {
+      if (!line.trim()) {
+        continue;
+      }
+      try {
+        const message = JSON.parse(line) as { event?: string; hwnd?: string };
+        if (
+          message.event === 'interaction' &&
+          message.hwnd &&
+          dwmPreviewOwner &&
+          !dwmPreviewOwner.isDestroyed()
+        ) {
+          dwmPreviewOwner.webContents.send('windows:interaction-complete', message.hwnd);
+        } else if (
+          message.event === 'window-closed' &&
+          message.hwnd &&
+          dwmPreviewOwner &&
+          !dwmPreviewOwner.isDestroyed()
+        ) {
+          dwmPreviewOwner.webContents.send('windows:closed', message.hwnd);
+        }
+      } catch {
+        // Ignore non-protocol output from the native preview host.
+      }
+    }
   });
 
   child.stderr.on('data', (chunk: Buffer) => {
@@ -317,6 +372,30 @@ function normalizeEmbedBounds(params: Pick<EmbedWindowParams, 'x' | 'y' | 'width
     '-Height',
     String(Math.max(60, Math.round(params.height)))
   ];
+}
+
+function syncDwmPreviewWindows(controllerWindow: BrowserWindow, previews: DwmPreviewWindow[]): DwmPreviewResult {
+  if (controllerWindow.isDestroyed() || controllerWindow.isMinimized() || !controllerWindow.isVisible()) {
+    return sendDwmPreviewCommand({ action: 'hide' });
+  }
+
+  const contentBounds = controllerWindow.getContentBounds();
+  const adjustedPreviews = previews
+    .filter((preview) => preview.id && preview.hwnd)
+    .map((preview) => ({
+      ...preview,
+      x: Math.round(contentBounds.x + preview.x),
+      y: Math.round(contentBounds.y + preview.y),
+      width: Math.max(1, Math.round(preview.width)),
+      height: Math.max(1, Math.round(preview.height)),
+      opacity: preview.opacity ?? 255
+    }));
+
+  return sendDwmPreviewCommand({
+    action: 'sync',
+    ownerHwnd: nativeWindowHandleToString(controllerWindow.getNativeWindowHandle()),
+    previews: adjustedPreviews
+  });
 }
 
 function getDockAppId(path: string): string {
@@ -764,6 +843,45 @@ ipcMain.handle('app:set-overlay-mode', async (event, enabled: boolean): Promise<
   }
 });
 
+ipcMain.handle('window:relay-pointer', async (event, input: RelayPointerInput): Promise<RelayPointerResult> => {
+  const controllerWindow = BrowserWindow.fromWebContents(event.sender);
+  if (!controllerWindow || controllerWindow.isDestroyed()) {
+    return { success: false, hwnd: input.hwnd || '', error: 'InfiniteDesk controller window is not available.' };
+  }
+
+  const validActions: RelayPointerInput['action'][] = ['down', 'move', 'up', 'cancel', 'wheel'];
+  if (
+    !input.hwnd ||
+    !Number.isFinite(input.normalizedX) ||
+    !Number.isFinite(input.normalizedY) ||
+    !validActions.includes(input.action)
+  ) {
+    return { success: false, hwnd: input.hwnd || '', error: 'Invalid mirrored pointer input.' };
+  }
+
+  controllerWindow.setAlwaysOnTop(true, 'screen-saver');
+  const result = sendDwmPreviewCommand({
+    action: 'input',
+    input: {
+      hwnd: input.hwnd,
+      normalizedX: Math.min(1, Math.max(0, input.normalizedX)),
+      normalizedY: Math.min(1, Math.max(0, input.normalizedY)),
+      phase: input.action,
+      button: input.button || 'left',
+      buttons: Math.max(0, Math.round(input.buttons || 0)),
+      wheelDelta: Math.round(input.wheelDelta || 0)
+    }
+  });
+  if (result.success && input.action === 'up') {
+    controllerWindow.webContents.send('windows:interaction-complete', input.hwnd);
+  }
+  return {
+    success: result.success,
+    hwnd: input.hwnd,
+    error: result.error
+  };
+});
+
 ipcMain.handle('app:quit', (): void => {
   app.quit();
 });
@@ -865,22 +983,9 @@ ipcMain.handle('dwm:sync-previews', (event, previews: DwmPreviewWindow[]): DwmPr
     };
   }
 
-  const contentBounds = controllerWindow.getContentBounds();
-  const adjustedPreviews = previews
-    .filter((preview) => preview.id && preview.hwnd)
-    .map((preview) => ({
-      ...preview,
-      x: Math.round(contentBounds.x + preview.x),
-      y: Math.round(contentBounds.y + preview.y),
-      width: Math.max(1, Math.round(preview.width)),
-      height: Math.max(1, Math.round(preview.height)),
-      opacity: preview.opacity ?? 255
-    }));
-
-  return sendDwmPreviewCommand({
-    action: 'sync',
-    previews: adjustedPreviews
-  });
+  dwmPreviewOwner = controllerWindow;
+  latestDwmPreviews = previews;
+  return syncDwmPreviewWindows(controllerWindow, previews);
 });
 
 ipcMain.handle('dwm:clear-previews', (): DwmPreviewResult => {

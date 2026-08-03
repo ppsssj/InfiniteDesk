@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet("scan", "restore", "focus", "move", "command", "embed", "detach", "moveEmbedded")]
+  [ValidateSet("scan", "restore", "focus", "move", "command", "embed", "detach", "moveEmbedded", "relayPointer")]
   [string]$Action,
 
   [string]$PayloadPath,
@@ -33,6 +33,15 @@ param(
   [int]$OriginalWidth,
 
   [int]$OriginalHeight
+
+  ,[double]$NormalizedX
+
+  ,[double]$NormalizedY
+
+  ,[ValidateSet("click", "wheel")]
+  [string]$PointerAction
+
+  ,[int]$WheelDelta
 )
 
 $ErrorActionPreference = "Stop"
@@ -131,6 +140,15 @@ public class WinApi {
   public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
   [DllImport("user32.dll")]
+  public static extern bool ScreenToClient(IntPtr hWnd, ref POINT point);
+
+  [DllImport("user32.dll")]
+  public static extern IntPtr ChildWindowFromPointEx(IntPtr hWndParent, POINT point, uint flags);
+
+  [DllImport("user32.dll")]
+  public static extern int MapWindowPoints(IntPtr hWndFrom, IntPtr hWndTo, ref POINT points, uint pointCount);
+
+  [DllImport("user32.dll")]
   public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 
   [StructLayout(LayoutKind.Sequential)]
@@ -139,6 +157,12 @@ public class WinApi {
     public int Top;
     public int Right;
     public int Bottom;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct POINT {
+    public int X;
+    public int Y;
   }
 }
 "@
@@ -320,7 +344,7 @@ function Get-OpenWindows {
     $hasInvalidMinimizedBounds = $isMinimized -and $isOutsideVirtualScreen
     $isOffscreenHidden = -not $isMinimized -and $isOutsideVirtualScreen
     $isInternal = $processName -eq "electron" -and $title -like "*InfiniteDesk*"
-    $isTinyHelper = -not $isMinimized -and -not $isInternal -and ($width -lt 200 -or $height -lt 100)
+    $hasNoUsefulPreview = -not $isMinimized -and -not $isInternal -and ($width -lt 320 -or $height -lt 180)
     $isRestorable = -not $hasInvalidMinimizedBounds -and -not $isOffscreenHidden -and -not $isInternal
     $statusReason = "Ready"
 
@@ -332,8 +356,8 @@ function Get-OpenWindows {
       $statusReason = "Offscreen / hidden"
     } elseif ($isMinimized) {
       $statusReason = "Minimized"
-    } elseif ($isTinyHelper) {
-      $statusReason = "Tiny helper window"
+    } elseif ($hasNoUsefulPreview) {
+      $statusReason = "No useful preview"
     }
 
     $windows.Add([pscustomobject]@{
@@ -347,7 +371,7 @@ function Get-OpenWindows {
       isMinimized = $isMinimized
       isRestorable = $isRestorable
       isInternal = $isInternal
-      isIgnored = $isTinyHelper -or $isOffscreenHidden
+      isIgnored = $hasNoUsefulPreview -or $isOffscreenHidden
       statusReason = $statusReason
     })
 
@@ -678,6 +702,82 @@ function Move-EmbeddedWindow {
   }
 }
 
+function Send-MirroredPointerInput {
+  param(
+    [string]$TargetHwnd,
+    [double]$TargetNormalizedX,
+    [double]$TargetNormalizedY,
+    [string]$TargetAction,
+    [int]$TargetWheelDelta
+  )
+
+  if ([string]::IsNullOrWhiteSpace($TargetHwnd)) {
+    return [pscustomobject]@{ success = $false; hwnd = ""; error = "No HWND was provided." }
+  }
+
+  $handle = Convert-StringToHwnd $TargetHwnd
+  if (-not [WinApi]::IsWindow($handle)) {
+    return [pscustomobject]@{ success = $false; hwnd = $TargetHwnd; error = "Window handle is no longer valid." }
+  }
+
+  if ([WinApi]::IsIconic($handle)) {
+    [void][WinApi]::ShowWindow($handle, 9)
+  }
+
+  $rect = Get-VisibleWindowRect $handle
+  if ($null -eq $rect) {
+    return [pscustomobject]@{ success = $false; hwnd = $TargetHwnd; error = "Could not read source window bounds." }
+  }
+
+  $normalizedX = [Math]::Min(1.0, [Math]::Max(0.0, $TargetNormalizedX))
+  $normalizedY = [Math]::Min(1.0, [Math]::Max(0.0, $TargetNormalizedY))
+  $screenX = [int][Math]::Round($rect.Left + (($rect.Right - $rect.Left - 1) * $normalizedX))
+  $screenY = [int][Math]::Round($rect.Top + (($rect.Bottom - $rect.Top - 1) * $normalizedY))
+  $clientPoint = New-Object WinApi+POINT
+  $clientPoint.X = $screenX
+  $clientPoint.Y = $screenY
+  if (-not [WinApi]::ScreenToClient($handle, [ref]$clientPoint)) {
+    return [pscustomobject]@{ success = $false; hwnd = $TargetHwnd; error = "Could not map mirrored coordinates." }
+  }
+
+  $targetHandle = $handle
+  $targetPoint = $clientPoint
+  $CWP_SKIPINVISIBLE = [uint32]0x0001
+  $CWP_SKIPDISABLED = [uint32]0x0002
+  $CWP_SKIPTRANSPARENT = [uint32]0x0004
+  $childFlags = $CWP_SKIPINVISIBLE -bor $CWP_SKIPDISABLED -bor $CWP_SKIPTRANSPARENT
+  for ($depth = 0; $depth -lt 8; $depth++) {
+    $childHandle = [WinApi]::ChildWindowFromPointEx($targetHandle, $targetPoint, $childFlags)
+    if ($childHandle -eq [IntPtr]::Zero -or $childHandle -eq $targetHandle) {
+      break
+    }
+    [void][WinApi]::MapWindowPoints($targetHandle, $childHandle, [ref]$targetPoint, 1)
+    $targetHandle = $childHandle
+  }
+
+  [void][WinApi]::SetForegroundWindow($handle)
+  $clientBits = ([uint32]($targetPoint.Y -band 0xFFFF) -shl 16) -bor [uint32]($targetPoint.X -band 0xFFFF)
+  $clientLParam = [IntPtr]([int64]$clientBits)
+  $success = $false
+
+  if ($TargetAction -eq "wheel") {
+    $wheelBits = [uint32]($TargetWheelDelta -band 0xFFFF) -shl 16
+    $screenBits = ([uint32]($screenY -band 0xFFFF) -shl 16) -bor [uint32]($screenX -band 0xFFFF)
+    $success = [WinApi]::PostMessage($targetHandle, 0x020A, [IntPtr]([int64]$wheelBits), [IntPtr]([int64]$screenBits))
+  } else {
+    [void][WinApi]::PostMessage($targetHandle, 0x0200, [IntPtr]::Zero, $clientLParam)
+    $down = [WinApi]::PostMessage($targetHandle, 0x0201, [IntPtr]1, $clientLParam)
+    $up = [WinApi]::PostMessage($targetHandle, 0x0202, [IntPtr]::Zero, $clientLParam)
+    $success = $down -and $up
+  }
+
+  return [pscustomobject]@{
+    success = $success
+    hwnd = $TargetHwnd
+    error = if ($success) { $null } else { "The mirrored pointer message could not be delivered." }
+  }
+}
+
 function Invoke-WindowCommand {
   param(
     [string]$TargetHwnd,
@@ -803,6 +903,11 @@ if ($Action -eq "detach") {
 
 if ($Action -eq "moveEmbedded") {
   Move-EmbeddedWindow $Hwnd $X $Y $Width $Height | ConvertTo-Json -Depth 5 -Compress
+  exit 0
+}
+
+if ($Action -eq "relayPointer") {
+  Send-MirroredPointerInput $Hwnd $NormalizedX $NormalizedY $PointerAction $WheelDelta | ConvertTo-Json -Depth 5 -Compress
   exit 0
 }
 

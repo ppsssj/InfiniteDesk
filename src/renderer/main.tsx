@@ -1,9 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
-  Box,
   BriefcaseBusiness,
-  ChevronDown,
   Eye,
   Layers,
   LocateFixed,
@@ -25,13 +23,14 @@ import type {
   DwmPreviewWindow,
   LayoutTemplate,
   MoveEmbeddedWindowParams,
+  RelayPointerInput,
   RestoreResult,
   SavedWorkspace,
   WindowCommand,
   WorkspaceRegion
 } from '../shared/types';
 import { createRegionFromTemplate, getWindowIdentity, getWindowsForRegion, updateRegionMembership } from './canvas/regions';
-import { createInitialVirtualLayout, toVirtualWindow, toVirtualWindows } from './canvas/windows';
+import { createInitialVirtualLayout, getVirtualWindowBounds, toVirtualWindow, toVirtualWindows } from './canvas/windows';
 import type { TemplateRegion, VirtualWindowState } from './canvas/types';
 import { CanvasPreview } from './components/CanvasPreview';
 import { Dock } from './components/Dock';
@@ -51,27 +50,13 @@ function virtualWindowToDetected(windowInfo: VirtualWindowState): DetectedWindow
     isRestorable: true,
     isInternal: false,
     isIgnored: windowInfo.isHelper,
-    statusReason: windowInfo.isHelper ? 'Tiny helper window' : 'Ready'
+    statusReason: windowInfo.isHelper ? 'No useful preview' : 'Ready'
   };
 }
 
 function restoreResultText(result: RestoreResult): string {
   const skippedText = result.skipped > 0 ? ` Skipped ${result.skipped}. ${result.errors.join(' ')}` : '';
   return `Restored ${result.restored} windows.${skippedText}`;
-}
-
-function interactiveControlNote(processName: string): string {
-  const normalized = processName.toLowerCase();
-  if (normalized.includes('kakao')) {
-    return 'Custom UI. Detach if input or scaling looks off.';
-  }
-  if (normalized.includes('chrome') || normalized.includes('edge') || normalized.includes('msedge')) {
-    return 'Browser windows may resist reparenting.';
-  }
-  if (normalized.includes('electron') || normalized.includes('code')) {
-    return 'Electron apps can have focus quirks.';
-  }
-  return 'Ready for direct input.';
 }
 
 function App(): React.JSX.Element {
@@ -101,6 +86,13 @@ function App(): React.JSX.Element {
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
   const [overlayModeEnabled, setOverlayModeEnabled] = useState(false);
   const [embeddedWindowIds, setEmbeddedWindowIds] = useState<string[]>([]);
+  const [isViewControlsExpanded, setIsViewControlsExpanded] = useState(false);
+  const virtualWindowsRef = useRef<VirtualWindowState[]>([]);
+  const initialVirtualWindowsRef = useRef<VirtualWindowState[]>([]);
+  const regionsRef = useRef<TemplateRegion[]>([]);
+  const autoScanInFlightRef = useRef(false);
+  const autoScanTimersRef = useRef<number[]>([]);
+  const latestInteractionSourceRef = useRef('');
 
   const canvasLabel = previewTemplate
     ? `Previewing template: ${previewTemplate.name}`
@@ -109,20 +101,6 @@ function App(): React.JSX.Element {
     : `${virtualWindows.length} windows - ${regions.length} regions`;
   const dirtyCount = virtualWindows.filter((windowInfo) => windowInfo.isDirty).length + regions.filter((region) => region.isDirty).length;
   const restorableCount = useMemo(() => windows.filter((windowInfo) => windowInfo.isRestorable && !windowInfo.isInternal).length, [windows]);
-  const selectedRegion = selectedRegionId ? regions.find((region) => region.id === selectedRegionId) || null : null;
-  const attachedInteractiveWindows = useMemo(
-    () =>
-      embeddedWindowIds.map((hwnd) => {
-        const windowInfo = virtualWindows.find((item) => item.hwnd === hwnd);
-        return {
-          hwnd,
-          title: windowInfo?.title || hwnd,
-          processName: windowInfo?.processName || 'unknown',
-          note: interactiveControlNote(windowInfo?.processName || '')
-        };
-      }),
-    [embeddedWindowIds, virtualWindows]
-  );
   const dockApps = useMemo(() => {
     const apps = [...defaultDockApps, ...localDockApps];
     const seen = new Set<string>();
@@ -137,12 +115,12 @@ function App(): React.JSX.Element {
   }, [localDockApps]);
   const canvasSafeArea = useMemo(
     () => ({
-      left: 260,
-      top: 88,
-      right: isDrawerOpen ? 380 : 220,
-      bottom: 110
+      left: 64,
+      top: 64,
+      right: 72,
+      bottom: 44
     }),
-    [isDrawerOpen]
+    []
   );
 
   async function loadTemplates(): Promise<void> {
@@ -403,6 +381,117 @@ function App(): React.JSX.Element {
     setIsBrandMenuOpen(false);
   }
 
+  function placeDetectedWindowsNearSource(
+    detectedWindows: VirtualWindowState[],
+    currentWindows: VirtualWindowState[],
+    sourceHwnd: string
+  ): VirtualWindowState[] {
+    const sourceWindow = currentWindows.find((windowInfo) => windowInfo.hwnd === sourceHwnd);
+    const currentBounds = getVirtualWindowBounds(currentWindows);
+    const fallbackX = currentBounds ? currentBounds.x + currentBounds.width + 96 : 120;
+    const fallbackY = currentBounds?.y ?? 120;
+
+    return detectedWindows.map((windowInfo, index) => {
+      const virtualX = Math.round(
+        sourceWindow ? sourceWindow.virtualX + sourceWindow.width + 80 + (index % 3) * 56 : fallbackX + (index % 3) * 72
+      );
+      const virtualY = Math.round(sourceWindow ? sourceWindow.virtualY + index * 72 : fallbackY + index * 72);
+      return {
+        ...windowInfo,
+        virtualX,
+        virtualY,
+        initialVirtualX: virtualX,
+        initialVirtualY: virtualY,
+        isDirty: false
+      };
+    });
+  }
+
+  async function scanForNewWindows(sourceHwnd: string): Promise<void> {
+    if (autoScanInFlightRef.current) {
+      return;
+    }
+
+    autoScanInFlightRef.current = true;
+    try {
+      const detected = await window.infiniteDesk.scanWindows();
+      setWindows(detected);
+
+      const currentWindows = virtualWindowsRef.current;
+      const knownHwnds = new Set(currentWindows.flatMap((windowInfo) => (windowInfo.hwnd ? [windowInfo.hwnd] : [])));
+      const newDetectedWindows = toVirtualWindows(detected).filter(
+        (windowInfo) => !windowInfo.isHelper && windowInfo.hwnd && !knownHwnds.has(windowInfo.hwnd)
+      );
+      if (newDetectedWindows.length === 0) {
+        return;
+      }
+
+      const placedWindows = placeDetectedWindowsNearSource(newDetectedWindows, currentWindows, sourceHwnd);
+      const nextWindows = [...currentWindows, ...placedWindows];
+      const nextInitialWindows = [
+        ...initialVirtualWindowsRef.current,
+        ...placedWindows.map((windowInfo) => ({ ...windowInfo, isDirty: false }))
+      ];
+      const nextRegions = updateRegionMembership(nextWindows, regionsRef.current);
+
+      virtualWindowsRef.current = nextWindows;
+      initialVirtualWindowsRef.current = nextInitialWindows;
+      regionsRef.current = nextRegions;
+      setVirtualWindows(nextWindows);
+      setInitialVirtualWindows(nextInitialWindows);
+      setRegions(nextRegions);
+      setPreviewTemplate(null);
+      setPreviewWorkspace(null);
+      setMessage(
+        `${placedWindows.length} new window${placedWindows.length === 1 ? '' : 's'} opened and added to InfiniteDesk.`
+      );
+    } catch (scanError) {
+      setError(`Could not detect a newly opened window: ${(scanError as Error).message}`);
+    } finally {
+      autoScanInFlightRef.current = false;
+    }
+  }
+
+  function scheduleNewWindowScans(sourceHwnd: string): void {
+    latestInteractionSourceRef.current = sourceHwnd;
+    if (autoScanTimersRef.current.length > 0) {
+      return;
+    }
+    autoScanTimersRef.current = [350, 1100, 2400].map((delay) =>
+      window.setTimeout(() => {
+        void scanForNewWindows(latestInteractionSourceRef.current);
+        if (delay === 2400) {
+          autoScanTimersRef.current = [];
+        }
+      }, delay)
+    );
+  }
+
+  function removeClosedWindowNode(hwnd: string): void {
+    const normalizedHwnd = hwnd.toLowerCase();
+    const currentWindows = virtualWindowsRef.current;
+    const nextWindows = currentWindows.filter((windowInfo) => windowInfo.hwnd?.toLowerCase() !== normalizedHwnd);
+    if (nextWindows.length === currentWindows.length) {
+      return;
+    }
+
+    const nextInitialWindows = initialVirtualWindowsRef.current.filter(
+      (windowInfo) => windowInfo.hwnd?.toLowerCase() !== normalizedHwnd
+    );
+    const nextRegions = updateRegionMembership(nextWindows, regionsRef.current);
+    virtualWindowsRef.current = nextWindows;
+    initialVirtualWindowsRef.current = nextInitialWindows;
+    regionsRef.current = nextRegions;
+    setWindows((current) => current.filter((windowInfo) => windowInfo.hwnd.toLowerCase() !== normalizedHwnd));
+    setVirtualWindows(nextWindows);
+    setInitialVirtualWindows(nextInitialWindows);
+    setRegions(nextRegions);
+    setEmbeddedWindowIds((current) => current.filter((item) => item.toLowerCase() !== normalizedHwnd));
+    setPreviewTemplate(null);
+    setPreviewWorkspace(null);
+    setMessage('A closed application window was removed from InfiniteDesk.');
+  }
+
   async function saveWorkspace(): Promise<void> {
     if (virtualWindows.length === 0 && regions.length === 0) {
       setError('There is no canvas state to save as a workspace.');
@@ -473,11 +562,6 @@ function App(): React.JSX.Element {
       }
 
       setMessage(`Window command sent: ${command}.`);
-      if (command === 'close' || command === 'minimize') {
-        window.setTimeout(() => {
-          void scanWindows();
-        }, 450);
-      }
     } catch (commandError) {
       setError((commandError as Error).message);
     }
@@ -507,6 +591,17 @@ function App(): React.JSX.Element {
       setMessage(`Interactive control attached "${windowInfo.title}" inside its process node.`);
     } catch (embedError) {
       setError((embedError as Error).message);
+    }
+  }
+
+  async function relayPointerInput(input: RelayPointerInput): Promise<void> {
+    try {
+      const result = await window.infiniteDesk.relayPointerInput(input);
+      if (!result.success) {
+        setError(result.error || 'Could not relay input to the original window.');
+      }
+    } catch (relayError) {
+      setError((relayError as Error).message);
     }
   }
 
@@ -698,6 +793,37 @@ function App(): React.JSX.Element {
   }, []);
 
   useEffect(() => {
+    virtualWindowsRef.current = virtualWindows;
+  }, [virtualWindows]);
+
+  useEffect(() => {
+    initialVirtualWindowsRef.current = initialVirtualWindows;
+  }, [initialVirtualWindows]);
+
+  useEffect(() => {
+    regionsRef.current = regions;
+  }, [regions]);
+
+  useEffect(() => {
+    const unsubscribeInteraction = window.infiniteDesk.onWindowInteractionComplete((sourceHwnd) => {
+      if (previewTemplate || previewWorkspace) {
+        return;
+      }
+      scheduleNewWindowScans(sourceHwnd);
+    });
+    const unsubscribeClosed = window.infiniteDesk.onWindowClosed((hwnd) => {
+      removeClosedWindowNode(hwnd);
+    });
+
+    return () => {
+      unsubscribeInteraction();
+      unsubscribeClosed();
+      autoScanTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
+      autoScanTimersRef.current = [];
+    };
+  }, [previewTemplate, previewWorkspace]);
+
+  useEffect(() => {
     function handleShortcuts(event: KeyboardEvent): void {
       if (event.key === 'Escape') {
         setIsDrawerOpen(false);
@@ -732,13 +858,12 @@ function App(): React.JSX.Element {
   }, [virtualWindows, regions, overlayModeEnabled]);
 
   return (
-    <main className={`immersive-shell theme-${themeMode} ${overlayModeEnabled ? 'overlay-mode' : ''}`}>
+    <main className={`immersive-shell theme-${themeMode} ${overlayModeEnabled ? 'overlay-mode' : ''} ${isDrawerOpen ? 'drawer-open' : ''}`}>
       <CanvasPreview
         windows={virtualWindows}
         regions={regions}
-        previewLabel={canvasLabel}
         safeArea={canvasSafeArea}
-        uiOverlayActive={isBrandMenuOpen || isDrawerOpen || isDockOverlayActive}
+        uiOverlayActive={isDrawerOpen || isDockOverlayActive || isBrandMenuOpen || isViewControlsExpanded}
         selectedRegionId={selectedRegionId}
         embeddedWindowIds={embeddedWindowIds}
         onWindowsChange={setVirtualWindows}
@@ -751,6 +876,7 @@ function App(): React.JSX.Element {
         onMoveEmbeddedWindow={(params) => void moveEmbeddedWindow(params)}
         onSyncDwmPreviews={(previews) => void syncDwmPreviews(previews)}
         onClearDwmPreviews={() => void clearDwmPreviews()}
+        onRelayPointerInput={(input) => void relayPointerInput(input)}
         onScanWindows={() => void scanWindows()}
         onSaveRegions={() => void saveRegions()}
         onApplyWindows={(targetWindows) => void applyWindows(targetWindows)}
@@ -762,14 +888,12 @@ function App(): React.JSX.Element {
         onZoomChange={setZoomScale}
       />
 
-      <div className="floating-brand">
-        <button className="brand-pill" onClick={() => setIsBrandMenuOpen((value) => !value)}>
+      <div className="floating-brand" data-dwm-ui-overlay="true">
+        <button className="brand-pill" title="InfiniteDesk menu" aria-label="InfiniteDesk menu" onClick={() => setIsBrandMenuOpen((value) => !value)}>
           <Layers size={18} />
-          <span>InfiniteDesk</span>
-          <ChevronDown size={15} />
         </button>
         {isBrandMenuOpen ? (
-          <div className="brand-menu">
+          <div className="brand-menu" data-dwm-ui-overlay="true">
             <button onClick={() => void scanWindows()}>
               <RefreshCw size={15} />
               Scan Windows
@@ -794,10 +918,6 @@ function App(): React.JSX.Element {
               <LocateFixed size={15} />
               Native Overlay {overlayModeEnabled ? 'Off' : 'On'}
             </button>
-            <button onClick={() => void detachAllInteractiveWindows()} disabled={embeddedWindowIds.length === 0}>
-              <Box size={15} />
-              Detach All Interactive
-            </button>
             <button onClick={() => setIsDrawerOpen(true)}>
               <Menu size={15} />
               Details
@@ -814,46 +934,44 @@ function App(): React.JSX.Element {
         ) : null}
       </div>
 
-      <div className="floating-view-controls">
-        <button title="Zoom out" onClick={() => setZoomOutSignal((value) => value + 1)}>
+      <div
+        className={`floating-view-controls ${isViewControlsExpanded ? 'expanded' : ''}`}
+        data-dwm-ui-overlay="true"
+        onMouseEnter={() => setIsViewControlsExpanded(true)}
+        onMouseLeave={() => setIsViewControlsExpanded(false)}
+        onFocusCapture={() => setIsViewControlsExpanded(true)}
+        onBlurCapture={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+            setIsViewControlsExpanded(false);
+          }
+        }}
+      >
+        <button className="view-controls-toggle" title="View controls" onClick={() => setIsViewControlsExpanded((value) => !value)}>
+          {Math.round(zoomScale * 100)}%
+        </button>
+        <button className="view-control-detail" title="Zoom out" onClick={() => setZoomOutSignal((value) => value + 1)}>
           <Minus size={15} />
         </button>
-        <span>{Math.round(zoomScale * 100)}%</span>
-        <button title="Zoom in" onClick={() => setZoomInSignal((value) => value + 1)}>
+        <button className="view-control-detail" title="Zoom in" onClick={() => setZoomInSignal((value) => value + 1)}>
           <Plus size={15} />
         </button>
-        <button onClick={() => setFitSignal((value) => value + 1)}>Fit</button>
-        <button onClick={() => setIsDrawerOpen((value) => !value)}>{isDrawerOpen ? 'Close' : 'Details'}</button>
+        <button className="view-control-detail" onClick={() => setFitSignal((value) => value + 1)}>Fit</button>
+        <button className="view-control-detail" onClick={() => setIsDrawerOpen((value) => !value)}>{isDrawerOpen ? 'Close' : 'Details'}</button>
       </div>
 
-      <button className={`overlay-mode-pill ${overlayModeEnabled ? 'enabled' : ''}`} onClick={() => void toggleOverlayMode()}>
-        <LocateFixed size={14} />
-        Native Overlay: {overlayModeEnabled ? 'On' : 'Off'}
-      </button>
-
-      <button className="interactive-control-pill enabled" onClick={() => setIsDrawerOpen(true)}>
-        <Box size={14} />
-        Interactive Control: On
-      </button>
-
-      <button className="floating-help-button" onClick={() => setIsDrawerOpen(true)} title="Show shortcuts and workflow help">
-        ?
-      </button>
-
-      {selectedRegion ? <div className="active-region-pill">Active Region: {selectedRegion.name}</div> : null}
-
-      {error ? <div className="floating-error">{error}</div> : null}
+      {error ? <div className="floating-error" data-dwm-ui-overlay="true">{error}</div> : null}
 
       <Dock
         apps={dockApps}
         pinnedApps={defaultDockApps}
+        statusLabel={canvasLabel}
         launchingAppId={launchingAppId}
         isLoadingApps={isLoadingDockApps}
         onLaunch={(dockApp) => void launchDockApp(dockApp)}
         onOverlayActiveChange={setIsDockOverlayActive}
       />
 
-      <aside className={`floating-drawer immersive-drawer ${isDrawerOpen ? 'open' : ''}`}>
+      <aside data-dwm-ui-overlay={isDrawerOpen ? 'true' : undefined} className={`floating-drawer immersive-drawer ${isDrawerOpen ? 'open' : ''}`}>
         <section className="side-section status-panel">
           <h2>Status</h2>
           <p>{message}</p>
@@ -867,15 +985,16 @@ function App(): React.JSX.Element {
             Native Overlay is {overlayModeEnabled ? 'On: InfiniteDesk is layered over real windows.' : 'Off: InfiniteDesk is a normal controller window.'}
           </p>
           <p>
-            Interactive Control is always on: {embeddedWindowIds.length} windows attached.
+            Mirror Control is always on. Original app windows remain unchanged.
           </p>
           <div className="shortcut-list">
             <strong>Workflow</strong>
             <span>Native Overlay makes InfiniteDesk a translucent layer above real windows.</span>
-            <span>Interactive Control attaches real app windows inside process nodes for direct click, type, and scroll input.</span>
+            <span>Mirror Control relays clicks, drags, right-clicks, scrolling, and focus while live views remain inside InfiniteDesk.</span>
             <span>Select a region, then launch apps from the Dock to place them there.</span>
             <span>Ctrl+Drag on empty canvas creates a Template Region.</span>
             <span>Drag a region to move its assigned windows together.</span>
+            <span>Click a live preview, then type normally; keyboard input follows the focused original app.</span>
             <span>Use window frame controls to focus, minimize, maximize, restore, or close real windows.</span>
           </div>
           <div className="shortcut-list">
@@ -886,37 +1005,6 @@ function App(): React.JSX.Element {
             <span>Ctrl+0 Fit View</span>
             <span>Ctrl+Shift+O Native Overlay</span>
             <span>Esc Close overlays</span>
-          </div>
-        </section>
-
-        <section className="side-section">
-          <div className="section-heading">
-            <h2>Interactive Control</h2>
-            <span>{attachedInteractiveWindows.length}</span>
-          </div>
-          <div className="interactive-control-panel">
-            <div className="interactive-control-status">Interactive Control is always on.</div>
-            <button className="secondary-button fill-button danger-inline-action" onClick={() => void detachAllInteractiveWindows()} disabled={attachedInteractiveWindows.length === 0}>
-              Detach All
-            </button>
-            {attachedInteractiveWindows.length === 0 ? (
-              <div className="empty-state">No interactive windows attached.</div>
-            ) : (
-              <div className="interactive-window-list">
-                {attachedInteractiveWindows.map((windowInfo) => (
-                  <article className="interactive-window-card" key={windowInfo.hwnd}>
-                    <div>
-                      <strong>{windowInfo.title}</strong>
-                      <span>{windowInfo.processName}</span>
-                      <em>{windowInfo.note}</em>
-                    </div>
-                    <button title="Detach interactive window" onClick={() => void detachRealWindow(windowInfo.hwnd)}>
-                      Detach
-                    </button>
-                  </article>
-                ))}
-              </div>
-            )}
           </div>
         </section>
 

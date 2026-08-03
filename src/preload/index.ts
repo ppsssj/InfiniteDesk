@@ -14,6 +14,8 @@ import type {
   LayoutTemplate,
   MoveEmbeddedWindowParams,
   OverlayModeResult,
+  RelayPointerInput,
+  RelayPointerResult,
   RestoreResult,
   SavedWorkspace,
   WindowCommand,
@@ -43,7 +45,18 @@ const api = {
   syncDwmPreviews: (previews: DwmPreviewWindow[]): Promise<DwmPreviewResult> => ipcRenderer.invoke('dwm:sync-previews', previews),
   clearDwmPreviews: (): Promise<DwmPreviewResult> => ipcRenderer.invoke('dwm:clear-previews'),
   controlWindow: (hwnd: string, command: WindowCommand): Promise<WindowCommandResult> =>
-    ipcRenderer.invoke('window:command', hwnd, command)
+    ipcRenderer.invoke('window:command', hwnd, command),
+  relayPointerInput: (input: RelayPointerInput): Promise<RelayPointerResult> => ipcRenderer.invoke('window:relay-pointer', input),
+  onWindowInteractionComplete: (callback: (hwnd: string) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, hwnd: string): void => callback(hwnd);
+    ipcRenderer.on('windows:interaction-complete', listener);
+    return () => ipcRenderer.removeListener('windows:interaction-complete', listener);
+  },
+  onWindowClosed: (callback: (hwnd: string) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, hwnd: string): void => callback(hwnd);
+    ipcRenderer.on('windows:closed', listener);
+    return () => ipcRenderer.removeListener('windows:closed', listener);
+  }
 };
 
 contextBridge.exposeInMainWorld('infiniteDesk', api);
