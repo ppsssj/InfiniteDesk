@@ -1,156 +1,190 @@
 # InfiniteDesk
 
-InfiniteDesk is a Windows desktop controller that lets you view, arrange, save, and restore real application windows on a spatial canvas.
+InfiniteDesk는 **지금 실행 중인 Windows 앱 창들을 한 화면에서 보고, 정리하고, 직접 조작할 수 있는 데스크톱 컨트롤러**입니다.
 
-It does not replace Windows Explorer or act as a shell. Real applications remain real OS windows. InfiniteDesk scans those windows by HWND, renders them as process nodes, shows live DWM previews where possible, and sends Win32 commands when the user chooses to move, focus, or apply a layout.
+예를 들어 VS Code, 브라우저, OBS처럼 이미 켜져 있는 다른 프로그램 창들을 InfiniteDesk 안의 Workspace에서 한눈에 보고, 창 위치를 바꾸고, 실제 Windows 창에 포커스/최소화/최대화 같은 명령을 보낼 수 있습니다.
 
-![InfiniteDesk workspace screenshot](docs/assets/workspace-screenshot.png)
+쉽게 말하면, InfiniteDesk는 앱 런처가 아닙니다.  
+**이미 실행 중인 다른 프로세스 창들을 하나의 작업 공간에서 조망하고 제어하는 도구**입니다.
 
-## What Works Now
+## 데모
 
-- Scan visible top-level Windows application windows.
-- Hide compact helper windows that cannot provide a useful process preview.
-- Read HWND, title, process name, bounds, minimized state, and restorable state.
-- Display process nodes on a dark infinite canvas.
-- Show live DWM thumbnail previews inside process nodes.
-- Pan, zoom, reset, and fit the canvas camera.
-- Drag process nodes to edit virtual layout positions.
-- Create Template Regions with Ctrl + drag.
-- Assign windows to regions by moving their center point into a region.
-- Save regions as layout templates.
-- Restore saved templates.
-- Apply the current canvas layout to real Windows windows.
-- Focus, minimize, maximize, restore, close, and Work in a real window.
-- Launch default pinned apps from the bottom Dock.
-- Use Native Overlay mode as a translucent control layer over the desktop.
-- Use Mirror Control to click, drag, right-click, scroll, focus, and type in original app windows through their live InfiniteDesk nodes.
-- Automatically detect new windows and popups opened by Mirror Control and add them beside the source process node.
+![InfiniteDesk demo](docs/video/infinitedesk-demo-cropped-clean.gif)
 
-## Design Direction
+[MP4 데모 영상 보기](docs/video/Infinitedesk-demo.mp4)
 
-InfiniteDesk uses a Native Overlay + Mirror Control model.
+![InfiniteDesk workspace](docs/assets/workspace-screenshot1.png)
 
-The main workflow is:
+![InfiniteDesk dock and app search](docs/assets/workspace-screenshot2.png)
 
-1. InfiniteDesk gives a spatial overview of running processes.
-2. DWM thumbnails provide live visual previews inside canvas nodes.
-3. Real interaction still happens in the actual Windows application.
-4. InfiniteDesk controls those windows through HWND-based Win32 commands.
+## 무엇을 할 수 있나
 
-DWM thumbnails provide the live view while Mirror Control maps continuous pointer input back to the original HWND. A pointer press focuses the original application, so subsequent keyboard input goes to that application while InfiniteDesk stays visually above it. The original application window keeps its parent, bounds, and desktop presence.
+- 현재 열려 있는 Windows 창을 자동으로 찾습니다.
+- 찾은 창들을 InfiniteDesk Workspace 안에 노드로 보여줍니다.
+- 각 노드 안에서 실제 앱 화면을 미리보기로 볼 수 있습니다.
+- 노드를 드래그해서 창 배치를 정리할 수 있습니다.
+- 정리한 배치를 실제 Windows 창 위치에 적용할 수 있습니다.
+- InfiniteDesk 안에서 원본 창에 포커스, 최소화, 최대화, 복원, 닫기 명령을 보낼 수 있습니다.
+- 노드 안의 미리보기에서 클릭, 드래그, 스크롤 같은 입력을 원본 앱 창으로 전달할 수 있습니다.
+- 자주 쓰는 창 배치를 Region과 Template으로 저장할 수 있습니다.
+- Dock에서 앱을 검색하고 실행할 수 있습니다.
+- Native Overlay 모드로 실제 데스크톱 위에 InfiniteDesk를 제어 레이어처럼 띄울 수 있습니다.
 
-## Requirements
+## 핵심 아이디어
 
-- Windows 10 or Windows 11
-- Node.js 20 or newer recommended
-- npm
-- PowerShell 5.1, included with Windows
+보통 Electron 앱은 자기 앱 안의 UI만 다룹니다.  
+InfiniteDesk는 여기서 한 단계 더 나아가, **앱 밖에서 실행 중인 실제 Windows 창**을 다룹니다.
 
-## Getting Started
+InfiniteDesk가 하는 일은 크게 네 가지입니다.
 
-Install dependencies:
+1. Windows에 떠 있는 실제 창 목록을 가져옵니다.
+2. 각 창을 Workspace 안의 카드처럼 보여줍니다.
+3. 사용자가 카드 위치를 바꾸면 그 배치를 저장합니다.
+4. 필요할 때 그 배치를 실제 Windows 창 위치와 크기에 반영합니다.
 
-```bash
-npm install
-```
+즉, 화면에 보이는 노드는 단순한 가짜 카드가 아니라 실제 Windows 창과 연결된 컨트롤 포인트입니다.
 
-Run the app in development:
+## 사용 흐름
 
-```bash
-npm run dev
-```
+1. InfiniteDesk를 실행합니다.
+2. `Scan Windows` 또는 `Ctrl + R`로 현재 열린 창을 스캔합니다.
+3. Workspace에서 여러 앱 창의 미리보기를 확인합니다.
+4. 창 노드를 드래그해서 원하는 작업 배치를 만듭니다.
+5. 필요한 경우 `Ctrl + Drag`로 Region을 만들고 창을 묶습니다.
+6. `Save Regions`로 자주 쓰는 배치를 Template으로 저장합니다.
+7. `Apply Layout`으로 Workspace의 배치를 실제 Windows 창에 적용합니다.
+8. Mirror Control이나 Native Overlay로 InfiniteDesk 안에서 원본 창을 조작합니다.
 
-Validate the project:
+## 왜 만들었나
 
-```bash
-npm run typecheck
-npm run build
-npm audit
-```
+여러 앱을 동시에 쓰다 보면 창이 금방 많아집니다. 어떤 창이 어디 있는지 찾기 어렵고, 작업을 시작할 때마다 창 위치를 다시 맞추는 것도 번거롭습니다.
 
-## Usage
+InfiniteDesk는 이 문제를 해결하기 위해 만들었습니다.
 
-1. Start InfiniteDesk.
-2. Use the floating `InfiniteDesk` menu or press Ctrl+R to scan windows.
-3. Pan or zoom the canvas to inspect running processes.
-4. Drag process nodes to arrange a virtual layout.
-5. Ctrl + drag on empty canvas to create a Template Region.
-6. Drag process nodes into a region to assign them.
-7. Click `Save Regions` to persist region templates.
-8. Click `Apply Layout` to move real Windows windows to the current virtual layout.
-9. Click `Work` on a node to focus the real app and minimize InfiniteDesk.
+- 여러 앱 창을 한 번에 보고 싶다.
+- 작업별 창 배치를 저장하고 싶다.
+- 저장한 배치를 실제 데스크톱에 다시 적용하고 싶다.
+- 앱을 새로 감싸지 않고, 원래 실행 중인 창을 그대로 제어하고 싶다.
 
-## Keyboard Shortcuts
+## 어떻게 동작하나
 
-- Ctrl+R: Scan Windows
-- Ctrl+S: Save Regions
-- Ctrl+Enter: Apply Layout
-- Ctrl+0: Fit View
-- Ctrl+Shift+O: Toggle Native Overlay
-- Esc: Close floating menus and drawers
+InfiniteDesk는 원본 앱을 복제하거나 새 컨테이너 안에 넣지 않습니다.  
+대신 Windows가 제공하는 창 핸들(HWND)과 DWM 미리보기, Win32 API를 사용합니다.
 
-## Architecture
+- `EnumWindows`로 현재 실행 중인 창 목록을 가져옵니다.
+- 창 제목, 프로세스명, 위치, 크기, 최소화 상태를 읽습니다.
+- DWM thumbnail로 원본 창 화면을 Workspace 노드 안에 보여줍니다.
+- `MoveWindow`, `SetWindowPos`, `ShowWindow`, `SetForegroundWindow` 같은 Win32 명령으로 실제 창을 제어합니다.
+- Mirror Control은 노드 안에서 발생한 마우스 입력을 원본 창의 좌표로 바꿔 전달합니다.
+
+## 기술 구조
 
 ```text
 React Renderer
   |
-  | context-isolated preload API
+  | Context-isolated Preload API
   v
 Electron Main Process
   |
-  +-- PowerShell Win32 scanner/control script
+  +-- PowerShell / Win32 Window Control
   |     |
-  |     +-- EnumWindows / GetWindowText / GetWindowRect
+  |     +-- EnumWindows
+  |     +-- GetWindowText / GetWindowRect
   |     +-- MoveWindow / SetWindowPos
   |     +-- ShowWindow / SetForegroundWindow
-  |     +-- Mirrored pointer coordinates / original-window focus
+  |     +-- Mirrored pointer input
   |
-  +-- DWM preview host process
+  +-- DWM Preview Host
         |
         +-- DwmRegisterThumbnail
         +-- DwmUpdateThumbnailProperties
 ```
 
-Templates are stored in Electron `userData/templates.json`.
+## 구현 포인트
 
-## Project Structure
+- Electron의 Main, Renderer, Preload를 분리했습니다.
+- Renderer는 Workspace, Dock, Drawer, Template UI를 담당합니다.
+- Main Process는 IPC를 통해 창 스캔, 레이아웃 적용, Overlay 전환, 앱 실행을 처리합니다.
+- Windows 창 제어는 PowerShell에서 Win32 API를 호출하는 방식으로 구현했습니다.
+- 실제 창 미리보기는 DWM thumbnail host를 통해 동기화합니다.
+- Template과 Workspace 데이터는 Electron `userData` 경로에 JSON 파일로 저장합니다.
+
+## 실행 방법
+
+### 요구 사항
+
+- Windows 10 또는 Windows 11
+- Node.js 20 이상 권장
+- npm
+- PowerShell 5.1 이상
+
+### 설치
+
+```bash
+npm install
+```
+
+### 개발 실행
+
+```bash
+npm run dev
+```
+
+### 검증
+
+```bash
+npm run typecheck
+npm run build
+```
+
+## 단축키
+
+- `Ctrl + R`: Windows 창 스캔
+- `Ctrl + S`: Region Template 저장
+- `Ctrl + Enter`: 현재 Workspace 레이아웃 적용
+- `Ctrl + 0`: Workspace 화면 맞춤
+- `Ctrl + Shift + O`: Native Overlay 전환
+- `Esc`: 메뉴와 Drawer 닫기
+
+## 프로젝트 구조
 
 ```text
 src/
   main/
-    index.ts              Electron main process and IPC handlers
-    windows.ps1           Win32 scanning and window control script
+    index.ts              Electron main process와 IPC handler
+    windows.ps1           Win32 창 스캔/제어 스크립트
     dwm-preview-host.ps1  DWM live preview host
   preload/
-    index.ts              Safe renderer IPC bridge
+    index.ts              Renderer에 노출되는 안전한 IPC bridge
   renderer/
-    main.tsx              React app shell
-    styles.css            Canvas, dock, drawer, and control styling
-    canvas/               Coordinate, layout, and region helpers
-    components/           Canvas and Dock components
-    dock/                 Default Dock app definitions
+    main.tsx              React application shell
+    styles.css            Workspace, Dock, Drawer, control styling
+    canvas/               좌표 변환, 창 배치, Region helper
+    components/           CanvasPreview, Dock component
+    dock/                 기본 Dock 앱 정의
   shared/
-    types.ts              Shared IPC and domain types
+    types.ts              Main/Renderer 공용 타입
 docs/
   assets/
-    workspace-screenshot.png
+    workspace-screenshot1.png
+    workspace-screenshot2.png
+  video/
+    Infinitedesk-demo.mp4
+    infinitedesk-demo-cropped-clean.gif
 ```
 
-## Current Limitations
+## 현재 한계
 
-- Mirror Control forwards continuous pointer messages to the original HWND; application-specific input handling can still vary.
-- Keyboard input uses the original app's focus after pressing inside its preview while InfiniteDesk remains visually above it.
-- Chrome, Edge, VS Code, Electron apps, and elevated/admin windows may reject or behave oddly under native control.
-- Focus commands are limited by Windows foreground restrictions.
-- Multi-monitor layout persistence is not deeply modeled yet.
-- Dock apps are currently defined in code instead of discovered from the Start Menu.
-- DWM previews are hosted as overlay windows, so screenshot tools and z-order behavior can vary by environment.
+- Windows 보안 정책이나 앱별 입력 처리 방식에 따라 일부 창 제어가 제한될 수 있습니다.
+- 관리자 권한으로 실행된 앱, Chromium 계열 앱, Electron 앱은 환경에 따라 다르게 동작할 수 있습니다.
+- DWM 미리보기는 네이티브 레이어로 동작하기 때문에 창 단위 녹화 도구에서는 실제 프로세스 화면이 빠질 수 있습니다. 녹화할 때는 OBS의 Display Capture처럼 모니터 화면 전체를 캡처하는 방식이 적합합니다.
+- 멀티 모니터 레이아웃 저장/복원은 아직 깊게 모델링하지 않았습니다.
+- Dock 앱 목록은 기본 앱과 로컬 검색 결과를 조합하며, 사용자가 직접 편집하는 기능은 아직 없습니다.
 
-## Next Steps
+## 다음 개선 방향
 
-- Harden Native Overlay recall and click-through behavior.
-- Add region-level apply and launch actions.
-- Add persistent Dock app editing.
-- Improve multi-monitor layout handling.
-- Replace PowerShell hot paths with a native helper for smoother live movement.
-- Keep DWM previews for overview while preserving real-window control as the main interaction model.
+- Native Overlay와 Mirror Control 안정성 개선
+- Region 단위 Apply / Launch workflow 강화
+- Dock 앱 편집 및 고정 기능 추가
+- 멀티 모니터 Workspace 모델 개선
+- PowerShell 기반 Win32 호출을 네이티브 헬퍼로 이전
