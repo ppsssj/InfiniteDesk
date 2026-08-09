@@ -1,0 +1,125 @@
+/* Minimal chrome: controls stay out of the canvas until they are needed. */
+.canvas-preview {
+  width: 100%;
+  transition: width 180ms ease;
+}
+
+.immersive-shell.drawer-open .canvas-preview {
+  width: calc(100% - 392px);
+  flex: none;
+}
+
+.floating-drawer {
+  right: 12px;
+  top: 12px;
+  bottom: 12px;
+  background: var(--panel-solid);
+  backdrop-filter: none;
+}
+
+.floating-brand {
+  left: 12px;
+  top: 12px;
+}
+
+.brand-pill {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  padding: 0;
+}
+
+.brand-menu,
+.context-menu,
+.dock-results {
+  background: var(--panel-solid);
+  backdrop-filter: none;
+}
+
+.floating-view-controls {
+  right: 12px;
+  top: 12px;
+  gap: 2px;
+  min-width: 54px;
+  background: var(--panel-solid);
+  transition:
+    width 150ms ease,
+    box-shadow 150ms ease;
+  backdrop-filter: none;
+}
+
+.floating-view-controls .view-controls-toggle {
+  min-width: 48px;
+  padding: 0 8px;
+}
+
+.floating-view-controls .view-control-detail {
+  display: none;
+}
+
+.floating-view-controls.expanded .view-control-detail {
+  display: inline-flex;
+}
+
+.dock-launcher {
+  bottom: 0;
+  padding-top: 13px;
+  opacity: 0.88;
+  transform: translate(-50%, calc(100% - 9px));
+  transition:
+    transform 180ms ease,
+    opacity 180ms ease,
+    box-shadow 180ms ease;
+  background: var(--panel-solid);
+  backdrop-filter: none;
+}
+
+.dock-launcher.expanded,
+.dock-launcher:focus-within {
+  opacity: 1;
+  transform: translate(-50%, -10px);
+}
+
+.dock-reveal-handle {
+  position: absolute;
+  left: 50%;
+  top: 3px;
+  width: 52px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--muted-2);
+  transform: translateX(-50%);
+}
+
+.dock-status {
+  overflow: hidden;
+  max-width: 100%;
+  color: var(--muted);
+  padding: 0 8px 5px;
+  font-size: 11px;
+  font-weight: 780;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.virtual-window-actions {
+  max-width: 0;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(8px);
+  transition:
+    max-width 150ms ease,
+    opacity 120ms ease,
+    transform 150ms ease;
+}
+
+.virtual-window:hover .virtual-window-actions,
+.virtual-window:focus-within .virtual-window-actions {
+  max-width: 70%;
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+}
