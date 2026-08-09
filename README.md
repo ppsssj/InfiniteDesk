@@ -151,9 +151,9 @@ npm run build
 ```text
 src/
   main/
-    index.ts              Electron main process와 IPC handler
-    windows.ps1           Win32 창 스캔/제어 스크립트
-    dwm-preview-host.ps1  DWM live preview host
+    index.ts                 Electron main process와 IPC handler
+    window-control-host.ps1  Win32 창 스캔/제어 상주 프로세스
+    dwm-preview-host.ps1     DWM live preview host
   preload/
     index.ts              Renderer에 노출되는 안전한 IPC bridge
   renderer/

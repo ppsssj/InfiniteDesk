@@ -1,48 +1,16 @@
-param(
-  [Parameter(Mandatory = $true)]
-  [ValidateSet("scan", "restore", "focus", "move", "command", "embed", "detach", "moveEmbedded", "relayPointer")]
-  [string]$Action,
-
-  [string]$PayloadPath,
-
-  [string]$Hwnd,
-
-  [string]$HostHwnd,
-
-  [ValidateSet("focus", "minimize", "maximize", "restore", "close")]
-  [string]$WindowCommand,
-
-  [string]$OriginalParentHwnd,
-
-  [string]$OriginalStyle,
-
-  [string]$OriginalExStyle,
-
-  [int]$X,
-
-  [int]$Y,
-
-  [int]$Width,
-
-  [int]$Height,
-
-  [int]$OriginalX,
-
-  [int]$OriginalY,
-
-  [int]$OriginalWidth,
-
-  [int]$OriginalHeight
-
-  ,[double]$NormalizedX
-
-  ,[double]$NormalizedY
-
-  ,[ValidateSet("click", "wheel")]
-  [string]$PointerAction
-
-  ,[int]$WheelDelta
-)
+# Persistent Win32 window-control host.
+#
+# Unlike dwm-preview-host.ps1, this script does NOT spin up a WinForms/STA
+# message-pump thread. Every action here is a synchronous P/Invoke call
+# (SetForegroundWindow, MoveWindow, SetWindowPos, ...) which does not require
+# a message pump in the calling thread -- a pump is only needed there because
+# that host renders WinForms thumbnail windows. Do not "fix" this file to look
+# like dwm-preview-host.ps1; the two hosts intentionally use different
+# threading models for different reasons.
+#
+# Protocol: NDJSON both directions over stdin/stdout.
+#   Node -> PS:  {"id":"42","action":"focus","params":{"hwnd":"0x..."}}
+#   PS -> Node:  {"id":"42","ok":true,"result":{...},"error":null}
 
 $ErrorActionPreference = "Stop"
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -140,15 +108,6 @@ public class WinApi {
   public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
   [DllImport("user32.dll")]
-  public static extern bool ScreenToClient(IntPtr hWnd, ref POINT point);
-
-  [DllImport("user32.dll")]
-  public static extern IntPtr ChildWindowFromPointEx(IntPtr hWndParent, POINT point, uint flags);
-
-  [DllImport("user32.dll")]
-  public static extern int MapWindowPoints(IntPtr hWndFrom, IntPtr hWndTo, ref POINT points, uint pointCount);
-
-  [DllImport("user32.dll")]
   public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 
   [StructLayout(LayoutKind.Sequential)]
@@ -170,11 +129,6 @@ public class WinApi {
 function Convert-HwndToString {
   param([IntPtr]$Handle)
   return "0x$($Handle.ToInt64().ToString('X'))"
-}
-
-function Convert-Int64ToHwndString {
-  param([Int64]$Handle)
-  return "0x$($Handle.ToString('X'))"
 }
 
 function Convert-StringToHwnd {
@@ -702,82 +656,6 @@ function Move-EmbeddedWindow {
   }
 }
 
-function Send-MirroredPointerInput {
-  param(
-    [string]$TargetHwnd,
-    [double]$TargetNormalizedX,
-    [double]$TargetNormalizedY,
-    [string]$TargetAction,
-    [int]$TargetWheelDelta
-  )
-
-  if ([string]::IsNullOrWhiteSpace($TargetHwnd)) {
-    return [pscustomobject]@{ success = $false; hwnd = ""; error = "No HWND was provided." }
-  }
-
-  $handle = Convert-StringToHwnd $TargetHwnd
-  if (-not [WinApi]::IsWindow($handle)) {
-    return [pscustomobject]@{ success = $false; hwnd = $TargetHwnd; error = "Window handle is no longer valid." }
-  }
-
-  if ([WinApi]::IsIconic($handle)) {
-    [void][WinApi]::ShowWindow($handle, 9)
-  }
-
-  $rect = Get-VisibleWindowRect $handle
-  if ($null -eq $rect) {
-    return [pscustomobject]@{ success = $false; hwnd = $TargetHwnd; error = "Could not read source window bounds." }
-  }
-
-  $normalizedX = [Math]::Min(1.0, [Math]::Max(0.0, $TargetNormalizedX))
-  $normalizedY = [Math]::Min(1.0, [Math]::Max(0.0, $TargetNormalizedY))
-  $screenX = [int][Math]::Round($rect.Left + (($rect.Right - $rect.Left - 1) * $normalizedX))
-  $screenY = [int][Math]::Round($rect.Top + (($rect.Bottom - $rect.Top - 1) * $normalizedY))
-  $clientPoint = New-Object WinApi+POINT
-  $clientPoint.X = $screenX
-  $clientPoint.Y = $screenY
-  if (-not [WinApi]::ScreenToClient($handle, [ref]$clientPoint)) {
-    return [pscustomobject]@{ success = $false; hwnd = $TargetHwnd; error = "Could not map mirrored coordinates." }
-  }
-
-  $targetHandle = $handle
-  $targetPoint = $clientPoint
-  $CWP_SKIPINVISIBLE = [uint32]0x0001
-  $CWP_SKIPDISABLED = [uint32]0x0002
-  $CWP_SKIPTRANSPARENT = [uint32]0x0004
-  $childFlags = $CWP_SKIPINVISIBLE -bor $CWP_SKIPDISABLED -bor $CWP_SKIPTRANSPARENT
-  for ($depth = 0; $depth -lt 8; $depth++) {
-    $childHandle = [WinApi]::ChildWindowFromPointEx($targetHandle, $targetPoint, $childFlags)
-    if ($childHandle -eq [IntPtr]::Zero -or $childHandle -eq $targetHandle) {
-      break
-    }
-    [void][WinApi]::MapWindowPoints($targetHandle, $childHandle, [ref]$targetPoint, 1)
-    $targetHandle = $childHandle
-  }
-
-  [void][WinApi]::SetForegroundWindow($handle)
-  $clientBits = ([uint32]($targetPoint.Y -band 0xFFFF) -shl 16) -bor [uint32]($targetPoint.X -band 0xFFFF)
-  $clientLParam = [IntPtr]([int64]$clientBits)
-  $success = $false
-
-  if ($TargetAction -eq "wheel") {
-    $wheelBits = [uint32]($TargetWheelDelta -band 0xFFFF) -shl 16
-    $screenBits = ([uint32]($screenY -band 0xFFFF) -shl 16) -bor [uint32]($screenX -band 0xFFFF)
-    $success = [WinApi]::PostMessage($targetHandle, 0x020A, [IntPtr]([int64]$wheelBits), [IntPtr]([int64]$screenBits))
-  } else {
-    [void][WinApi]::PostMessage($targetHandle, 0x0200, [IntPtr]::Zero, $clientLParam)
-    $down = [WinApi]::PostMessage($targetHandle, 0x0201, [IntPtr]1, $clientLParam)
-    $up = [WinApi]::PostMessage($targetHandle, 0x0202, [IntPtr]::Zero, $clientLParam)
-    $success = $down -and $up
-  }
-
-  return [pscustomobject]@{
-    success = $success
-    hwnd = $TargetHwnd
-    error = if ($success) { $null } else { "The mirrored pointer message could not be delivered." }
-  }
-}
-
 function Invoke-WindowCommand {
   param(
     [string]$TargetHwnd,
@@ -871,49 +749,74 @@ function Invoke-WindowCommand {
   }
 }
 
-if ($Action -eq "scan") {
-  Get-OpenWindows | ConvertTo-Json -Depth 5 -Compress
-  exit 0
+function Write-Response {
+  param(
+    [string]$Id,
+    $Result,
+    [bool]$Ok = $true,
+    [string]$ErrorMessage = $null
+  )
+
+  $envelope = [pscustomobject]@{
+    id = $Id
+    ok = $Ok
+    result = $Result
+    error = $ErrorMessage
+  }
+
+  [Console]::Out.WriteLine(($envelope | ConvertTo-Json -Depth 8 -Compress))
+  [Console]::Out.Flush()
 }
 
-if ($Action -eq "focus") {
-  Focus-Window $Hwnd | ConvertTo-Json -Depth 5 -Compress
-  exit 0
+function Invoke-Dispatch {
+  param($Message)
+
+  switch ($Message.action) {
+    "scan" { return Get-OpenWindows }
+    "restore" { return Restore-Windows $Message.params.windows }
+    "focus" { return Focus-Window $Message.params.hwnd }
+    "move" { return Move-SingleWindow $Message.params.hwnd $Message.params.x $Message.params.y $Message.params.width $Message.params.height }
+    "command" { return Invoke-WindowCommand $Message.params.hwnd $Message.params.command }
+    "embed" { return Embed-Window $Message.params.hwnd $Message.params.hostHwnd $Message.params.x $Message.params.y $Message.params.width $Message.params.height }
+    "detach" { return Detach-EmbeddedWindow $Message.params.hwnd $Message.params.originalParentHwnd $Message.params.originalStyle $Message.params.originalExStyle $Message.params.originalX $Message.params.originalY $Message.params.originalWidth $Message.params.originalHeight }
+    "moveEmbedded" { return Move-EmbeddedWindow $Message.params.hwnd $Message.params.x $Message.params.y $Message.params.width $Message.params.height }
+    default { throw "Unsupported action: $($Message.action)" }
+  }
 }
 
-if ($Action -eq "move") {
-  Move-SingleWindow $Hwnd $X $Y $Width $Height | ConvertTo-Json -Depth 5 -Compress
-  exit 0
+while ($true) {
+  $line = [Console]::In.ReadLine()
+  if ($null -eq $line) {
+    break
+  }
+
+  $line = $line.TrimStart([char]0xFEFF)
+  if ([string]::IsNullOrWhiteSpace($line)) {
+    continue
+  }
+
+  $message = $null
+  try {
+    # PS 5.1's ConvertFrom-Json has no -Depth parameter (unlike ConvertTo-Json).
+    # Its default depth already handles this app's payloads; do not add one.
+    $message = $line | ConvertFrom-Json
+  } catch {
+    [Console]::Error.WriteLine("[window-control-host] Failed to parse message: $($_.Exception.Message)")
+    continue
+  }
+
+  if ($message.action -eq "exit") {
+    break
+  }
+
+  try {
+    $result = Invoke-Dispatch $message
+    Write-Response -Id $message.id -Result $result -Ok $true
+  } catch {
+    # Per-message error isolation: any exception here must not kill the loop,
+    # since this process now serves every future window-control command too.
+    Write-Response -Id $message.id -Result $null -Ok $false -ErrorMessage $_.Exception.Message
+  }
 }
 
-if ($Action -eq "command") {
-  Invoke-WindowCommand $Hwnd $WindowCommand | ConvertTo-Json -Depth 5 -Compress
-  exit 0
-}
-
-if ($Action -eq "embed") {
-  Embed-Window $Hwnd $HostHwnd $X $Y $Width $Height | ConvertTo-Json -Depth 8 -Compress
-  exit 0
-}
-
-if ($Action -eq "detach") {
-  Detach-EmbeddedWindow $Hwnd $OriginalParentHwnd $OriginalStyle $OriginalExStyle $OriginalX $OriginalY $OriginalWidth $OriginalHeight | ConvertTo-Json -Depth 8 -Compress
-  exit 0
-}
-
-if ($Action -eq "moveEmbedded") {
-  Move-EmbeddedWindow $Hwnd $X $Y $Width $Height | ConvertTo-Json -Depth 5 -Compress
-  exit 0
-}
-
-if ($Action -eq "relayPointer") {
-  Send-MirroredPointerInput $Hwnd $NormalizedX $NormalizedY $PointerAction $WheelDelta | ConvertTo-Json -Depth 5 -Compress
-  exit 0
-}
-
-if ([string]::IsNullOrWhiteSpace($PayloadPath) -or -not (Test-Path $PayloadPath)) {
-  throw "PayloadPath is required for restore."
-}
-
-$payload = Get-Content $PayloadPath -Raw | ConvertFrom-Json
-Restore-Windows $payload.windows | ConvertTo-Json -Depth 8 -Compress
+exit 0
