@@ -27,7 +27,6 @@ function AppIcon({ app }: { app: DockApp }): React.JSX.Element {
 export function Dock({ apps, pinnedApps, statusLabel, launchingAppId, isLoadingApps, onLaunch, onOverlayActiveChange }: DockProps): React.JSX.Element {
   const [query, setQuery] = React.useState('');
   const [isAllAppsOpen, setIsAllAppsOpen] = React.useState(false);
-  const [isExpanded, setIsExpanded] = React.useState(false);
   const normalizedQuery = query.trim().toLowerCase();
   const searchResults = React.useMemo(() => {
     if (normalizedQuery.length === 0) {
@@ -35,34 +34,17 @@ export function Dock({ apps, pinnedApps, statusLabel, launchingAppId, isLoadingA
     }
 
     return apps
-      .filter((app) => `${app.name} ${app.processName || ''} ${app.executablePath}`.toLowerCase().includes(normalizedQuery))
-      .slice(0, 24);
+      .filter((app) => `${app.name} ${app.processName || ''} ${app.executablePath}`.toLowerCase().includes(normalizedQuery));
   }, [apps, isAllAppsOpen, normalizedQuery]);
   const shouldShowResults = normalizedQuery.length > 0 || isAllAppsOpen;
 
   React.useEffect(() => {
-    onOverlayActiveChange(shouldShowResults || isExpanded);
+    onOverlayActiveChange(shouldShowResults);
     return () => onOverlayActiveChange(false);
-  }, [isExpanded, onOverlayActiveChange, shouldShowResults]);
+  }, [onOverlayActiveChange, shouldShowResults]);
 
   return (
-    <div
-      className={`dock-launcher ${isExpanded ? 'expanded' : ''}`}
-      data-dwm-ui-overlay="true"
-      onMouseEnter={() => setIsExpanded(true)}
-      onMouseLeave={(event) => {
-        if (!event.currentTarget.contains(document.activeElement)) {
-          setIsExpanded(false);
-        }
-      }}
-      onFocusCapture={() => setIsExpanded(true)}
-      onBlurCapture={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-          setIsExpanded(false);
-        }
-      }}
-    >
-      <div className="dock-reveal-handle" aria-hidden="true" />
+    <div className="dock-launcher" data-dwm-ui-overlay="true">
       <div className="dock-status">{statusLabel}</div>
       <div className="dock-search">
         <Search size={15} />
@@ -107,6 +89,7 @@ export function Dock({ apps, pinnedApps, statusLabel, launchingAppId, isLoadingA
                 key={app.id}
                 onClick={() => {
                   setQuery('');
+                  setIsAllAppsOpen(false);
                   onLaunch(app);
                 }}
                 disabled={launchingAppId === app.id}
