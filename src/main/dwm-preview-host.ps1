@@ -3,13 +3,18 @@ $ErrorActionPreference = "Stop"
 Add-Type -ReferencedAssemblies @(
   "System.Windows.Forms",
   "System.Drawing",
-  "System.Web.Extensions"
+  "System.Web.Extensions",
+  "UIAutomationClient",
+  "UIAutomationTypes",
+  "WindowsBase"
 ) -TypeDefinition @"
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Windows.Automation;
 using System.Windows.Forms;
 using System.Web.Script.Serialization;
 
@@ -44,6 +49,7 @@ namespace InfiniteDeskPreview {
     public string button { get; set; }
     public int buttons { get; set; }
     public int wheelDelta { get; set; }
+    public string controllerHwnd { get; set; }
   }
 
   [StructLayout(LayoutKind.Sequential)]
@@ -88,10 +94,34 @@ namespace InfiniteDeskPreview {
     private const int MK_LBUTTON = 0x0001;
     private const int MK_RBUTTON = 0x0002;
     private const int MK_MBUTTON = 0x0010;
+    private const byte VK_CONTROL = 0x11;
+    private const byte VK_UP = 0x26;
+    private const byte VK_DOWN = 0x28;
+    private const uint KEYEVENTF_KEYUP = 0x0002;
     private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    private static readonly HashSet<string> AccessibleWheelProcesses = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+      "chrome",
+      "msedge",
+      "brave",
+      "vivaldi",
+      "opera",
+      "electron",
+      "figma"
+    };
 
     private static readonly Dictionary<long, IntPtr> capturedTargets = new Dictionary<long, IntPtr>();
     private static readonly Dictionary<long, int> capturedButtons = new Dictionary<long, int>();
+    private sealed class CodeEditorTarget {
+      public AutomationElement input;
+      public System.Windows.Rect bounds;
+    }
+    private static readonly Dictionary<long, List<CodeEditorTarget>> codeEditorTargets = new Dictionary<long, List<CodeEditorTarget>>();
+    private static readonly object codeScrollSync = new object();
+    private static System.Threading.Timer codeFocusRestoreTimer;
+    private static DateTime codeFocusRestoreAtUtc;
+    private static IntPtr pendingCodeController = IntPtr.Zero;
+    private static long activeCodeSource;
+    private static AutomationElement activeCodeInput;
 
     [DllImport("user32.dll")]
     private static extern bool IsWindow(IntPtr hWnd);
@@ -140,6 +170,9 @@ namespace InfiniteDeskPreview {
 
     [DllImport("user32.dll")]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+
+    [DllImport("user32.dll")]
+    private static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct Point {
@@ -208,6 +241,10 @@ namespace InfiniteDeskPreview {
       }
 
       if (phase == "wheel") {
+        IntPtr controller = ParseHwnd(input.controllerHwnd);
+        if (TryRelayAccessibleWheel(source, controller, screenPoint, input.wheelDelta)) {
+          return;
+        }
         FocusSource(source);
         int wheelParam = (input.wheelDelta & 0xFFFF) << 16;
         PostMessage(target, WM_MOUSEWHEEL, new IntPtr(wheelParam), MakePointParam(screenPoint.x, screenPoint.y));
@@ -253,6 +290,184 @@ namespace InfiniteDeskPreview {
       } finally {
         if (attachedSource) AttachThreadInput(currentThread, sourceThread, false);
         if (attachedForeground) AttachThreadInput(currentThread, foregroundThread, false);
+      }
+    }
+
+    private static string GetProcessName(IntPtr source) {
+      uint processId;
+      GetWindowThreadProcessId(source, out processId);
+      if (processId == 0) {
+        return String.Empty;
+      }
+      try {
+        return Process.GetProcessById((int)processId).ProcessName;
+      } catch {
+        return String.Empty;
+      }
+    }
+
+    private static bool TryRelayAccessibleWheel(IntPtr source, IntPtr controller, Point screenPoint, int wheelDelta) {
+      if (wheelDelta == 0) {
+        return true;
+      }
+
+      string processName = GetProcessName(source);
+      if (String.Equals(processName, "code", StringComparison.OrdinalIgnoreCase)) {
+        return TryScrollCodeEditor(source, controller, screenPoint, wheelDelta);
+      }
+      return AccessibleWheelProcesses.Contains(processName) && TryScrollAutomation(source, screenPoint, wheelDelta);
+    }
+
+    private static bool TryScrollAutomation(IntPtr source, Point screenPoint, int wheelDelta) {
+      try {
+        AutomationElement root = AutomationElement.FromHandle(source);
+        Condition condition = new PropertyCondition(AutomationElement.IsScrollPatternAvailableProperty, true);
+        AutomationElementCollection candidates = root.FindAll(TreeScope.Descendants, condition);
+        AutomationElement selected = null;
+        double selectedArea = Double.MaxValue;
+
+        for (int index = 0; index < candidates.Count; index++) {
+          AutomationElement candidate = candidates[index];
+          ScrollPattern pattern;
+          try {
+            pattern = (ScrollPattern)candidate.GetCurrentPattern(ScrollPattern.Pattern);
+          } catch {
+            continue;
+          }
+          if (!pattern.Current.VerticallyScrollable) {
+            continue;
+          }
+
+          System.Windows.Rect bounds = candidate.Current.BoundingRectangle;
+          bool containsPoint = !bounds.IsEmpty &&
+            screenPoint.x >= bounds.Left && screenPoint.x < bounds.Right &&
+            screenPoint.y >= bounds.Top && screenPoint.y < bounds.Bottom;
+          double area = bounds.IsEmpty ? Double.MaxValue : bounds.Width * bounds.Height;
+          if ((containsPoint && area < selectedArea) || (selected == null && !containsPoint)) {
+            selected = candidate;
+            selectedArea = containsPoint ? area : Double.MaxValue;
+          }
+        }
+        if (selected == null) {
+          return false;
+        }
+
+        ScrollPattern selectedPattern = (ScrollPattern)selected.GetCurrentPattern(ScrollPattern.Pattern);
+        ScrollAmount amount = wheelDelta < 0 ? ScrollAmount.SmallIncrement : ScrollAmount.SmallDecrement;
+        int steps = Math.Max(1, Math.Abs(wheelDelta) / 120) * 3;
+        for (int step = 0; step < steps; step++) {
+          selectedPattern.Scroll(ScrollAmount.NoAmount, amount);
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    private static bool TryScrollCodeEditor(IntPtr source, IntPtr controller, Point screenPoint, int wheelDelta) {
+      long sourceKey = source.ToInt64();
+      for (int attempt = 0; attempt < 2; attempt++) {
+        try {
+          CodeEditorTarget target = FindCodeEditorTarget(source, screenPoint, attempt > 0);
+          if (target == null) {
+            return false;
+          }
+
+          bool needsFocus = GetForegroundWindow() != source ||
+            activeCodeSource != sourceKey ||
+            !Object.ReferenceEquals(activeCodeInput, target.input);
+          if (needsFocus) {
+            FocusSource(source);
+            target.input.SetFocus();
+            Thread.Sleep(8);
+            activeCodeSource = sourceKey;
+            activeCodeInput = target.input;
+          }
+
+          int steps = Math.Max(1, Math.Abs(wheelDelta) / 120);
+          byte direction = wheelDelta < 0 ? VK_DOWN : VK_UP;
+          for (int step = 0; step < steps; step++) {
+            keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero);
+            keybd_event(direction, 0, 0, UIntPtr.Zero);
+            keybd_event(direction, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+          }
+          ScheduleCodeFocusRestore(controller);
+          return true;
+        } catch {
+          codeEditorTargets.Remove(sourceKey);
+          activeCodeSource = 0;
+          activeCodeInput = null;
+        }
+      }
+      return false;
+    }
+
+    private static CodeEditorTarget FindCodeEditorTarget(IntPtr source, Point screenPoint, bool refresh) {
+      long sourceKey = source.ToInt64();
+      List<CodeEditorTarget> targets;
+      if (refresh || !codeEditorTargets.TryGetValue(sourceKey, out targets)) {
+        targets = new List<CodeEditorTarget>();
+        AutomationElement root = AutomationElement.FromHandle(source);
+        Condition editorsCondition = new PropertyCondition(AutomationElement.ClassNameProperty, "editor-instance");
+        Condition inputCondition = new PropertyCondition(AutomationElement.ClassNameProperty, "native-edit-context");
+        AutomationElementCollection editors = root.FindAll(TreeScope.Descendants, editorsCondition);
+        for (int index = 0; index < editors.Count; index++) {
+          AutomationElement editor = editors[index];
+          AutomationElement input = editor.FindFirst(TreeScope.Descendants, inputCondition);
+          if (input == null) {
+            continue;
+          }
+          targets.Add(new CodeEditorTarget {
+            input = input,
+            bounds = editor.Current.BoundingRectangle
+          });
+        }
+        codeEditorTargets[sourceKey] = targets;
+      }
+
+      foreach (CodeEditorTarget target in targets) {
+        System.Windows.Rect bounds = target.bounds;
+        if (!bounds.IsEmpty &&
+            screenPoint.x >= bounds.Left && screenPoint.x < bounds.Right &&
+            screenPoint.y >= bounds.Top && screenPoint.y < bounds.Bottom) {
+          return target;
+        }
+      }
+      return null;
+    }
+
+    private static void ScheduleCodeFocusRestore(IntPtr controller) {
+      if (controller == IntPtr.Zero || !IsWindow(controller)) {
+        return;
+      }
+      lock (codeScrollSync) {
+        pendingCodeController = controller;
+        codeFocusRestoreAtUtc = DateTime.UtcNow.AddMilliseconds(180);
+        if (codeFocusRestoreTimer == null) {
+          codeFocusRestoreTimer = new System.Threading.Timer(RestoreCodeFocus, null, 180, Timeout.Infinite);
+        } else {
+          codeFocusRestoreTimer.Change(180, Timeout.Infinite);
+        }
+      }
+    }
+
+    private static void RestoreCodeFocus(object state) {
+      IntPtr controller;
+      lock (codeScrollSync) {
+        int remaining = (int)Math.Ceiling((codeFocusRestoreAtUtc - DateTime.UtcNow).TotalMilliseconds);
+        if (remaining > 0) {
+          codeFocusRestoreTimer.Change(remaining, Timeout.Infinite);
+          return;
+        }
+        controller = pendingCodeController;
+        pendingCodeController = IntPtr.Zero;
+        activeCodeSource = 0;
+        activeCodeInput = null;
+      }
+      if (controller != IntPtr.Zero && IsWindow(controller)) {
+        KeepControllerAbove(controller);
+        FocusSource(controller);
       }
     }
 
@@ -325,6 +540,7 @@ namespace InfiniteDeskPreview {
   public sealed class MouseWheelHook : IDisposable {
     private const int WH_MOUSE_LL = 14;
     private const int WM_MOUSEWHEEL = 0x020A;
+    private const uint LLMHF_INJECTED = 0x00000001;
     private delegate IntPtr HookProcedure(int code, IntPtr message, IntPtr data);
     public delegate bool WheelHandler(int screenX, int screenY, int delta);
 
@@ -368,6 +584,9 @@ namespace InfiniteDeskPreview {
     private IntPtr HandleHook(int code, IntPtr message, IntPtr data) {
       if (code >= 0 && message.ToInt32() == WM_MOUSEWHEEL) {
         LowLevelMouseInput input = (LowLevelMouseInput)Marshal.PtrToStructure(data, typeof(LowLevelMouseInput));
+        if ((input.flags & LLMHF_INJECTED) != 0) {
+          return CallNextHookEx(hook, code, message, data);
+        }
         int delta = (short)((input.mouseData >> 16) & 0xFFFF);
         if (delta != 0 && handler(input.point.x, input.point.y, delta)) {
           return new IntPtr(1);
@@ -589,7 +808,8 @@ namespace InfiniteDeskPreview {
         phase = phase,
         button = button,
         buttons = GetButtons(eventArgs.Button),
-        wheelDelta = eventArgs.Delta
+        wheelDelta = eventArgs.Delta,
+        controllerHwnd = HwndToString(ownerHwnd)
       });
     }
 
@@ -813,12 +1033,20 @@ namespace InfiniteDeskPreview {
   }
 
   public static class Host {
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+
     public static void Run() {
       JavaScriptSerializer serializer = new JavaScriptSerializer();
       ManualResetEventSlim ready = new ManualResetEventSlim(false);
       PreviewContext context = null;
 
       Thread uiThread = new Thread(delegate() {
+        try {
+          SetThreadDpiAwarenessContext(new IntPtr(-4));
+        } catch {
+          // Per-monitor V2 is best-effort on older Windows builds.
+        }
         Application.EnableVisualStyles();
         context = new PreviewContext();
         ready.Set();
