@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   clampScale,
+  easeOutCubic,
   fitViewToBounds,
   fitViewToWindows,
+  interpolateCanvasTransform,
   MAX_CANVAS_SCALE,
   MIN_CANVAS_SCALE,
   screenToWorld,
@@ -21,6 +23,24 @@ describe('clampScale', () => {
 
   it('passes through values already in range', () => {
     expect(clampScale(1)).toBe(1);
+  });
+});
+
+describe('camera transform animation', () => {
+  it('uses a clamped ease-out curve', () => {
+    expect(easeOutCubic(-1)).toBe(0);
+    expect(easeOutCubic(0.5)).toBeCloseTo(0.875);
+    expect(easeOutCubic(2)).toBe(1);
+  });
+
+  it('interpolates camera position and scale', () => {
+    expect(
+      interpolateCanvasTransform(
+        { offsetX: 0, offsetY: 100, scale: 0.2 },
+        { offsetX: 200, offsetY: 300, scale: 0.6 },
+        0.25
+      )
+    ).toEqual({ offsetX: 50, offsetY: 150, scale: 0.3 });
   });
 });
 

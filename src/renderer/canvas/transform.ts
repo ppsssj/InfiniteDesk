@@ -26,6 +26,24 @@ export function clampScale(scale: number): number {
   return Math.min(MAX_CANVAS_SCALE, Math.max(MIN_CANVAS_SCALE, scale));
 }
 
+export function easeOutCubic(progress: number): number {
+  const clampedProgress = Math.min(1, Math.max(0, progress));
+  return 1 - Math.pow(1 - clampedProgress, 3);
+}
+
+export function interpolateCanvasTransform(
+  from: CanvasTransform,
+  to: CanvasTransform,
+  progress: number
+): CanvasTransform {
+  const clampedProgress = Math.min(1, Math.max(0, progress));
+  return {
+    offsetX: from.offsetX + (to.offsetX - from.offsetX) * clampedProgress,
+    offsetY: from.offsetY + (to.offsetY - from.offsetY) * clampedProgress,
+    scale: from.scale + (to.scale - from.scale) * clampedProgress
+  };
+}
+
 export function worldToScreen(x: number, y: number, transform: CanvasTransform): { x: number; y: number } {
   return {
     x: x * transform.scale + transform.offsetX,
