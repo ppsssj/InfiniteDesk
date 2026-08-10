@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { X } from 'lucide-react';
 import type { DetectedWindow, DockApp, LayoutTemplate, SavedWorkspace } from '../shared/types';
 import { createRegionFromTemplate, getWindowIdentity, getWindowsForRegion, updateRegionMembership } from './canvas/regions';
 import { createInitialVirtualLayout, toVirtualWindow, toVirtualWindows } from './canvas/windows';
@@ -27,6 +28,8 @@ import './styles/base.css';
 import './styles/theme.css';
 import './styles/chrome.css';
 
+const AUTO_WINDOW_SCAN_INTERVAL_MS = 1800;
+
 function App(): React.JSX.Element {
   const [windows, setWindows] = useState<DetectedWindow[]>([]);
   const [virtualWindows, setVirtualWindows] = useState<VirtualWindowState[]>([]);
@@ -46,6 +49,7 @@ function App(): React.JSX.Element {
   const [resetViewSignal, setResetViewSignal] = useState(0);
   const [zoomInSignal, setZoomInSignal] = useState(0);
   const [zoomOutSignal, setZoomOutSignal] = useState(0);
+  const [cameraFocusRequest, setCameraFocusRequest] = useState<{ id: number; hwnd: string } | null>(null);
   const [zoomScale, setZoomScale] = useState(1);
   const [launchingAppId, setLaunchingAppId] = useState<string | null>(null);
   const [localDockApps, setLocalDockApps] = useState<DockApp[]>([]);
@@ -61,6 +65,8 @@ function App(): React.JSX.Element {
   const autoScanInFlightRef = useRef(false);
   const autoScanTimersRef = useRef<number[]>([]);
   const latestInteractionSourceRef = useRef('');
+  const cameraFocusRequestIdRef = useRef(0);
+  const hasCompletedInitialScanRef = useRef(false);
 
   const canvasLabel = previewTemplate
     ? `Previewing template: ${previewTemplate.name}`
@@ -83,10 +89,10 @@ function App(): React.JSX.Element {
   }, [localDockApps]);
   const canvasSafeArea = useMemo(
     () => ({
-      left: 64,
-      top: 64,
-      right: 72,
-      bottom: 44
+      left: 16,
+      top: 16,
+      right: 16,
+      bottom: 16
     }),
     []
   );
@@ -172,9 +178,19 @@ function App(): React.JSX.Element {
     } catch (scanError) {
       setError((scanError as Error).message);
     } finally {
+      hasCompletedInitialScanRef.current = true;
       setIsScanning(false);
       setIsBrandMenuOpen(false);
     }
+  }
+
+  function focusCameraOnWindow(hwnd: string | undefined): void {
+    if (!hwnd) {
+      return;
+    }
+
+    cameraFocusRequestIdRef.current += 1;
+    setCameraFocusRequest({ id: cameraFocusRequestIdRef.current, hwnd });
   }
 
   async function scanAfterLaunch(dockApp: DockApp): Promise<void> {
@@ -182,17 +198,15 @@ function App(): React.JSX.Element {
       window.setTimeout(resolve, 1400);
     });
 
+    const activeRegion = selectedRegionId ? regions.find((region) => region.id === selectedRegionId) || null : null;
+    if (!activeRegion) {
+      await scanForNewWindows('', dockApp);
+      return;
+    }
+
     try {
       const detected = await window.infiniteDesk.scanWindows();
       setWindows(detected);
-      const activeRegion = selectedRegionId ? regions.find((region) => region.id === selectedRegionId) || null : null;
-
-      if (!activeRegion) {
-        const layout = createInitialVirtualLayout(detected);
-        loadVirtualLayout(layout, [], null);
-        setMessage(`Launched ${dockApp.name}. Scanned ${detected.length} windows.`);
-        return;
-      }
 
       const knownHwnds = new Set(virtualWindows.flatMap((windowInfo) => (windowInfo.hwnd ? [windowInfo.hwnd] : [])));
       const matchedDetectedWindow =
@@ -227,6 +241,7 @@ function App(): React.JSX.Element {
       setRegions(nextRegions);
       setPreviewTemplate(null);
       setSelectedRegionId(activeRegion.id);
+      focusCameraOnWindow(nextWindow.hwnd);
       setMessage(`${dockApp.name} added to ${activeRegion.name}.`);
     } catch (scanError) {
       setError(`${dockApp.name} launched, but scanning failed: ${(scanError as Error).message}`);
@@ -332,9 +347,9 @@ function App(): React.JSX.Element {
     setIsBrandMenuOpen(false);
   }
 
-  async function scanForNewWindows(sourceHwnd: string): Promise<void> {
+  async function scanForNewWindows(sourceHwnd: string, preferredDockApp?: DockApp): Promise<number> {
     if (autoScanInFlightRef.current) {
-      return;
+      return 0;
     }
 
     autoScanInFlightRef.current = true;
@@ -348,7 +363,7 @@ function App(): React.JSX.Element {
         (windowInfo) => !windowInfo.isHelper && windowInfo.hwnd && !knownHwnds.has(windowInfo.hwnd)
       );
       if (newDetectedWindows.length === 0) {
-        return;
+        return 0;
       }
 
       const placedWindows = placeDetectedWindowsNearSource(newDetectedWindows, currentWindows, sourceHwnd);
@@ -367,11 +382,24 @@ function App(): React.JSX.Element {
       setRegions(nextRegions);
       setPreviewTemplate(null);
       setPreviewWorkspace(null);
+      const preferredHwnd = preferredDockApp
+        ? detected.find(
+            (windowInfo) =>
+              processMatchesDockApp(windowInfo, preferredDockApp) &&
+              newDetectedWindows.some((candidate) => candidate.hwnd?.toLowerCase() === windowInfo.hwnd.toLowerCase())
+          )?.hwnd
+        : undefined;
+      const focusTarget =
+        placedWindows.find((windowInfo) => windowInfo.hwnd?.toLowerCase() === preferredHwnd?.toLowerCase()) ||
+        placedWindows[placedWindows.length - 1];
+      focusCameraOnWindow(focusTarget?.hwnd);
       setMessage(
         `${placedWindows.length} new window${placedWindows.length === 1 ? '' : 's'} opened and added to InfiniteDesk.`
       );
+      return placedWindows.length;
     } catch (scanError) {
       setError(`Could not detect a newly opened window: ${(scanError as Error).message}`);
+      return 0;
     } finally {
       autoScanInFlightRef.current = false;
     }
@@ -559,6 +587,18 @@ function App(): React.JSX.Element {
   }, [previewTemplate, previewWorkspace]);
 
   useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      if (!hasCompletedInitialScanRef.current || isScanning || previewTemplate || previewWorkspace) {
+        return;
+      }
+
+      void scanForNewWindows('');
+    }, AUTO_WINDOW_SCAN_INTERVAL_MS);
+
+    return () => window.clearInterval(intervalId);
+  }, [isScanning, previewTemplate, previewWorkspace]);
+
+  useEffect(() => {
     function handleShortcuts(event: KeyboardEvent): void {
       if (event.key === 'Escape') {
         setIsDrawerOpen(false);
@@ -593,104 +633,122 @@ function App(): React.JSX.Element {
   }, [virtualWindows, regions, overlayModeEnabled]);
 
   return (
-    <main className={`immersive-shell theme-${themeMode} ${overlayModeEnabled ? 'overlay-mode' : ''} ${isDrawerOpen ? 'drawer-open' : ''}`}>
-      <CanvasPreview
-        windows={virtualWindows}
-        regions={regions}
-        safeArea={canvasSafeArea}
-        uiOverlayActive={isDrawerOpen || isDockOverlayActive || isBrandMenuOpen || isViewControlsExpanded}
-        selectedRegionId={selectedRegionId}
-        embeddedWindowIds={embeddedWindowIds}
-        onWindowsChange={setVirtualWindows}
-        onRegionsChange={setRegions}
-        onSelectRegion={setSelectedRegionId}
-        onWorkWindow={(hwnd) => void workInRealWindow(hwnd)}
-        onWindowCommand={(hwnd, command) => void controlRealWindow(hwnd, command)}
-        onEmbedWindow={(windowInfo, bounds) => void embedRealWindow(windowInfo, bounds)}
-        onDetachEmbeddedWindow={(hwnd) => void detachRealWindow(hwnd)}
-        onMoveEmbeddedWindow={(params) => void moveEmbeddedWindow(params)}
-        onSyncDwmPreviews={(previews) => void syncDwmPreviews(previews)}
-        onClearDwmPreviews={() => void clearDwmPreviews()}
-        onRelayPointerInput={(input) => void relayPointerInput(input)}
-        onScanWindows={() => void scanWindows()}
-        onSaveRegions={() => void saveRegions()}
-        onApplyWindows={(targetWindows) => void applyWindows(targetWindows)}
-        onSaveRegion={(region) => void saveSingleRegion(region)}
-        fitSignal={fitSignal}
-        resetViewSignal={resetViewSignal}
-        zoomInSignal={zoomInSignal}
-        zoomOutSignal={zoomOutSignal}
-        onZoomChange={setZoomScale}
-      />
-
-      <BrandMenu
-        isOpen={isBrandMenuOpen}
-        onToggle={() => setIsBrandMenuOpen((value) => !value)}
-        onScan={() => void scanWindows()}
-        onSaveRegions={() => void saveRegions()}
-        onSaveWorkspace={() => void saveWorkspace()}
-        onApplyLayout={() => void applyCanvasLayout()}
-        applyDisabled={virtualWindows.length === 0}
-        onResetEdits={resetLayoutEdits}
-        resetDisabled={dirtyCount === 0}
-        onToggleOverlay={() => void toggleOverlayMode()}
-        overlayModeEnabled={overlayModeEnabled}
-        onOpenDetails={() => setIsDrawerOpen(true)}
-        onToggleTheme={toggleThemeMode}
-        themeMode={themeMode}
-        onQuit={() => void quitInfiniteDesk()}
-      />
-
-      <ViewControls
-        isExpanded={isViewControlsExpanded}
-        onExpandedChange={setIsViewControlsExpanded}
-        zoomScale={zoomScale}
-        isDrawerOpen={isDrawerOpen}
-        onToggleDrawer={() => setIsDrawerOpen((value) => !value)}
-        onZoomIn={() => setZoomInSignal((value) => value + 1)}
-        onZoomOut={() => setZoomOutSignal((value) => value + 1)}
-        onFit={() => setFitSignal((value) => value + 1)}
-      />
-
-      {error ? <div className="floating-error" data-dwm-ui-overlay="true">{error}</div> : null}
-
-      <Dock
-        apps={dockApps}
-        pinnedApps={defaultDockApps}
-        statusLabel={canvasLabel}
-        launchingAppId={launchingAppId}
-        isLoadingApps={isLoadingDockApps}
-        onLaunch={(dockApp) => void launchDockApp(dockApp)}
-        onOverlayActiveChange={setIsDockOverlayActive}
-      />
-
-      <aside data-dwm-ui-overlay={isDrawerOpen ? 'true' : undefined} className={`floating-drawer immersive-drawer ${isDrawerOpen ? 'open' : ''}`}>
-        <StatusPanel
-          message={message}
-          restorableCount={restorableCount}
-          regionsCount={regions.length}
-          dirtyCount={dirtyCount}
-          workspacesCount={workspaces.length}
-          templatesCount={templates.length}
+    <main
+      className={`immersive-shell theme-${themeMode} ${overlayModeEnabled ? 'overlay-mode' : ''} ${isDrawerOpen ? 'drawer-open' : ''} ${isBrandMenuOpen ? 'brand-menu-open' : ''} ${isDockOverlayActive ? 'dock-open' : ''}`}
+    >
+      <header className="workspace-top-bar" data-dwm-ui-overlay="true">
+        <BrandMenu
+          isOpen={isBrandMenuOpen}
+          onToggle={() => setIsBrandMenuOpen((value) => !value)}
+          onScan={() => void scanWindows()}
+          onSaveRegions={() => void saveRegions()}
+          onSaveWorkspace={() => void saveWorkspace()}
+          onApplyLayout={() => void applyCanvasLayout()}
+          applyDisabled={virtualWindows.length === 0}
+          onResetEdits={resetLayoutEdits}
+          resetDisabled={dirtyCount === 0}
+          onToggleOverlay={() => void toggleOverlayMode()}
           overlayModeEnabled={overlayModeEnabled}
+          onOpenDetails={() => setIsDrawerOpen((value) => !value)}
+          onToggleTheme={toggleThemeMode}
+          themeMode={themeMode}
+          onQuit={() => void quitInfiniteDesk()}
         />
 
-        <RegionsList regions={regions} selectedRegionId={selectedRegionId} />
+        <div className={`workspace-bar-status ${error ? 'error' : ''}`} title={error || message}>
+          {error || canvasLabel}
+        </div>
 
-        <WorkspaceList
-          workspaces={workspaces}
-          onPreview={previewWorkspaceOnCanvas}
-          onRestore={(workspace) => void restoreWorkspace(workspace)}
-          onDelete={(workspace) => void deleteWorkspace(workspace)}
+        <ViewControls
+          isExpanded={isViewControlsExpanded}
+          onExpandedChange={setIsViewControlsExpanded}
+          zoomScale={zoomScale}
+          isDrawerOpen={isDrawerOpen}
+          onToggleDrawer={() => setIsDrawerOpen((value) => !value)}
+          onZoomIn={() => setZoomInSignal((value) => value + 1)}
+          onZoomOut={() => setZoomOutSignal((value) => value + 1)}
+          onFit={() => setFitSignal((value) => value + 1)}
+        />
+      </header>
+
+      <section className="workspace-stage">
+        <CanvasPreview
+          windows={virtualWindows}
+          regions={regions}
+          safeArea={canvasSafeArea}
+          uiOverlayActive={isDrawerOpen || isDockOverlayActive || isBrandMenuOpen || isViewControlsExpanded}
+          selectedRegionId={selectedRegionId}
+          embeddedWindowIds={embeddedWindowIds}
+          onWindowsChange={setVirtualWindows}
+          onRegionsChange={setRegions}
+          onSelectRegion={setSelectedRegionId}
+          onWorkWindow={(hwnd) => void workInRealWindow(hwnd)}
+          onWindowCommand={(hwnd, command) => void controlRealWindow(hwnd, command)}
+          onEmbedWindow={(windowInfo, bounds) => void embedRealWindow(windowInfo, bounds)}
+          onDetachEmbeddedWindow={(hwnd) => void detachRealWindow(hwnd)}
+          onMoveEmbeddedWindow={(params) => void moveEmbeddedWindow(params)}
+          onSyncDwmPreviews={(previews) => void syncDwmPreviews(previews)}
+          onClearDwmPreviews={() => void clearDwmPreviews()}
+          onRelayPointerInput={(input) => void relayPointerInput(input)}
+          onScanWindows={() => void scanWindows()}
+          onSaveRegions={() => void saveRegions()}
+          onApplyWindows={(targetWindows) => void applyWindows(targetWindows)}
+          onSaveRegion={(region) => void saveSingleRegion(region)}
+          fitSignal={fitSignal}
+          resetViewSignal={resetViewSignal}
+          zoomInSignal={zoomInSignal}
+          zoomOutSignal={zoomOutSignal}
+          cameraFocusRequest={cameraFocusRequest}
+          onZoomChange={setZoomScale}
         />
 
-        <TemplateList
-          templates={templates}
-          onPreview={previewTemplateOnCanvas}
-          onRestore={(template) => void restoreTemplate(template)}
-          onDelete={(template) => void deleteTemplate(template)}
+        <aside data-dwm-ui-overlay={isDrawerOpen ? 'true' : undefined} className={`floating-drawer immersive-drawer ${isDrawerOpen ? 'open' : ''}`}>
+          <div className="details-drawer-header">
+            <strong>Details</strong>
+            <button type="button" title="Close details" aria-label="Close details" onClick={() => setIsDrawerOpen(false)}>
+              <X size={15} />
+            </button>
+          </div>
+
+          <StatusPanel
+            message={message}
+            restorableCount={restorableCount}
+            regionsCount={regions.length}
+            dirtyCount={dirtyCount}
+            workspacesCount={workspaces.length}
+            templatesCount={templates.length}
+            overlayModeEnabled={overlayModeEnabled}
+          />
+
+          <RegionsList regions={regions} selectedRegionId={selectedRegionId} />
+
+          <WorkspaceList
+            workspaces={workspaces}
+            onPreview={previewWorkspaceOnCanvas}
+            onRestore={(workspace) => void restoreWorkspace(workspace)}
+            onDelete={(workspace) => void deleteWorkspace(workspace)}
+          />
+
+          <TemplateList
+            templates={templates}
+            onPreview={previewTemplateOnCanvas}
+            onRestore={(template) => void restoreTemplate(template)}
+            onDelete={(template) => void deleteTemplate(template)}
+          />
+        </aside>
+      </section>
+
+      <footer className="workspace-bottom-bar" data-dwm-ui-overlay="true">
+        <Dock
+          apps={dockApps}
+          pinnedApps={defaultDockApps}
+          statusLabel={canvasLabel}
+          launchingAppId={launchingAppId}
+          isLoadingApps={isLoadingDockApps}
+          onLaunch={(dockApp) => void launchDockApp(dockApp)}
+          onOverlayActiveChange={setIsDockOverlayActive}
         />
-      </aside>
+      </footer>
     </main>
   );
 }

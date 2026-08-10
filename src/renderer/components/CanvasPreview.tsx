@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Focus, Maximize2, Minimize2, RotateCcw, X } from 'lucide-react';
-import { clampScale, screenToWorld, worldToScreen } from '../canvas/transform';
+import { clampScale, easeOutCubic, interpolateCanvasTransform, screenToWorld, worldToScreen, type CanvasTransform } from '../canvas/transform';
 import { getWindowIdentity, updateRegionMembership } from '../canvas/regions';
 import type { DwmPreviewWindow, WindowCommand } from '../../shared/types';
 import type { TemplateRegion, VirtualWindowState } from '../canvas/types';
@@ -12,6 +12,7 @@ import {
   MIN_REGION_HEIGHT,
   OVERVIEW_CONTENT_INSET,
   OVERVIEW_TITLEBAR_HEIGHT,
+  COMPACT_OVERVIEW_SCALE,
   REGION_COLORS
 } from './CanvasPreview.constants';
 import { getWindowKey, normalizeDraftRegion, getSafeCanvasBounds } from './CanvasPreview.helpers';
@@ -22,6 +23,8 @@ import { useCanvasTransform } from '../hooks/useCanvasTransform';
 import { useWindowFrameGeometry } from '../hooks/useWindowFrameGeometry';
 import { useEmbeddedWindowSync } from '../hooks/useEmbeddedWindowSync';
 import { useMirrorPointerRelay } from '../hooks/useMirrorPointerRelay';
+
+const CAMERA_FOCUS_ANIMATION_MS = 360;
 
 export function CanvasPreview({
   windows,
@@ -49,12 +52,16 @@ export function CanvasPreview({
   resetViewSignal,
   zoomInSignal,
   zoomOutSignal,
+  cameraFocusRequest,
   onZoomChange
 }: CanvasPreviewProps): React.JSX.Element {
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<PanDrag | CreateRegionDrag | WindowDrag | RegionDrag | null>(null);
   const windowsRef = useRef(windows);
   const regionsRef = useRef(regions);
+  const handledCameraFocusRequestRef = useRef(0);
+  const cameraAnimationFrameRef = useRef<number | null>(null);
+  const transformRef = useRef<CanvasTransform>({ offsetX: 0, offsetY: 0, scale: 1 });
   const [dragMode, setDragMode] = useState<'none' | 'pan' | 'window' | 'region' | 'create-region'>('none');
   const [draftRegion, setDraftRegion] = useState<TemplateRegion | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -73,6 +80,8 @@ export function CanvasPreview({
     zoomOutSignal,
     onZoomChange
   });
+
+  transformRef.current = transform;
 
   const {
     isEmbeddedWindow,
@@ -116,6 +125,45 @@ export function CanvasPreview({
     regionsRef.current = regions;
   }, [regions]);
 
+  function cancelCameraAnimation(): void {
+    if (cameraAnimationFrameRef.current !== null) {
+      window.cancelAnimationFrame(cameraAnimationFrameRef.current);
+      cameraAnimationFrameRef.current = null;
+    }
+  }
+
+  function animateCameraTo(targetTransform: CanvasTransform): void {
+    cancelCameraAnimation();
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      transformRef.current = targetTransform;
+      setTransform(targetTransform);
+      return;
+    }
+
+    const startTransform = { ...transformRef.current };
+    const startedAt = window.performance.now();
+    const animateFrame = (timestamp: number): void => {
+      const rawProgress = Math.min(1, (timestamp - startedAt) / CAMERA_FOCUS_ANIMATION_MS);
+      const nextTransform = interpolateCanvasTransform(startTransform, targetTransform, easeOutCubic(rawProgress));
+      transformRef.current = nextTransform;
+      setTransform(nextTransform);
+
+      if (rawProgress < 1) {
+        cameraAnimationFrameRef.current = window.requestAnimationFrame(animateFrame);
+      } else {
+        cameraAnimationFrameRef.current = null;
+      }
+    };
+
+    cameraAnimationFrameRef.current = window.requestAnimationFrame(animateFrame);
+  }
+
+  useEffect(() => () => cancelCameraAnimation(), []);
+
+  useEffect(() => {
+    cancelCameraAnimation();
+  }, [fitSignal, resetViewSignal, zoomInSignal, zoomOutSignal]);
+
   useEffect(() => {
     if (shouldSuspendNativePreviews) {
       onClearDwmPreviews();
@@ -132,6 +180,9 @@ export function CanvasPreview({
     const canvas = canvasRef.current;
     const canvasWidth = canvas?.clientWidth || 0;
     const canvasHeight = canvas?.clientHeight || 0;
+    const canvasRect = canvas?.getBoundingClientRect();
+    const canvasOffsetX = canvasRect?.left || 0;
+    const canvasOffsetY = canvasRect?.top || 0;
 
     if (previewBounds.width <= 20 || previewBounds.height <= 20) {
       return [];
@@ -140,8 +191,8 @@ export function CanvasPreview({
     return getVisiblePreviewRects(previewBounds, canvasWidth, canvasHeight).map((visibleBounds, segmentIndex) => ({
       id: `${windowInfo.hwnd}:segment:${segmentIndex}`,
       hwnd: windowInfo.hwnd!,
-      x: Math.round(visibleBounds.x),
-      y: Math.round(visibleBounds.y),
+      x: Math.round(canvasOffsetX + visibleBounds.x),
+      y: Math.round(canvasOffsetY + visibleBounds.y),
       width: Math.max(1, Math.round(visibleBounds.width)),
       height: Math.max(1, Math.round(visibleBounds.height)),
       cropX: Math.min(1, Math.max(0, (visibleBounds.x - previewBounds.x) / previewBounds.width)),
@@ -207,6 +258,7 @@ export function CanvasPreview({
       return;
     }
 
+    cancelCameraAnimation();
     setContextMenu(null);
     onSelectRegion(null);
     const canvas = canvasRef.current;
@@ -260,6 +312,7 @@ export function CanvasPreview({
       return;
     }
 
+    cancelCameraAnimation();
     setContextMenu(null);
     event.stopPropagation();
     dragRef.current = {
@@ -280,6 +333,7 @@ export function CanvasPreview({
       return;
     }
 
+    cancelCameraAnimation();
     setContextMenu(null);
     onSelectRegion(region.id);
     event.stopPropagation();
@@ -439,6 +493,7 @@ export function CanvasPreview({
   }
 
   function handleWheel(event: React.WheelEvent<HTMLDivElement>): void {
+    cancelCameraAnimation();
     event.preventDefault();
     const canvas = canvasRef.current;
     if (!canvas) {
@@ -532,6 +587,7 @@ export function CanvasPreview({
       return;
     }
 
+    cancelCameraAnimation();
     const interactiveTransform = getInteractiveEmbedTransform(windowInfo);
     setTransform(interactiveTransform);
     onEmbedWindow(windowInfo, getEmbeddedContentBounds(windowInfo, true, interactiveTransform));
@@ -546,6 +602,7 @@ export function CanvasPreview({
   }
 
   function zoomToWindowNode(windowInfo: VirtualWindowState): void {
+    cancelCameraAnimation();
     const canvas = canvasRef.current;
     const canvasWidth = canvas?.clientWidth || window.innerWidth;
     const canvasHeight = canvas?.clientHeight || window.innerHeight;
@@ -565,6 +622,36 @@ export function CanvasPreview({
       )
     });
   }
+
+  function focusWindowNode(windowInfo: VirtualWindowState): void {
+    const canvas = canvasRef.current;
+    const canvasWidth = canvas?.clientWidth || window.innerWidth;
+    const canvasHeight = canvas?.clientHeight || window.innerHeight;
+    const { safeCenterX, safeCenterY } = getSafeCanvasBounds(canvasWidth, canvasHeight, safeArea);
+    const nextScale = clampScale(Math.max(transform.scale, 0.18));
+
+    animateCameraTo({
+      scale: nextScale,
+      offsetX: Math.round(safeCenterX - (windowInfo.virtualX + windowInfo.width / 2) * nextScale),
+      offsetY: Math.round(safeCenterY - (windowInfo.virtualY + windowInfo.height / 2) * nextScale)
+    });
+  }
+
+  useEffect(() => {
+    if (!cameraFocusRequest || handledCameraFocusRequestRef.current === cameraFocusRequest.id) {
+      return;
+    }
+
+    const targetWindow = windows.find(
+      (windowInfo) => windowInfo.hwnd?.toLowerCase() === cameraFocusRequest.hwnd.toLowerCase()
+    );
+    if (!targetWindow) {
+      return;
+    }
+
+    handledCameraFocusRequestRef.current = cameraFocusRequest.id;
+    focusWindowNode(targetWindow);
+  }, [cameraFocusRequest, windows]);
 
   const renderedRegions = draftRegion ? [...regions, normalizeDraftRegion(draftRegion)] : regions;
   const contextWindow =
@@ -641,12 +728,14 @@ export function CanvasPreview({
             const frame = getFrameScreenBounds(windowInfo);
             const isEmbedded = isEmbeddedWindow(windowInfo);
             const isNativeEmbeddedVisible = shouldShowNativeEmbeddedWindow(windowInfo);
+            const isCompactOverview = !isEmbedded && transform.scale < COMPACT_OVERVIEW_SCALE;
             return (
               <article
-                className={`virtual-window ${windowInfo.isHelper ? 'helper-window' : ''} ${windowInfo.isDirty ? 'dirty-window' : ''} ${
+                className={`virtual-window ${!isEmbedded ? 'overview-window' : ''} ${isCompactOverview ? 'compact-overview-window' : ''} ${windowInfo.isHelper ? 'helper-window' : ''} ${windowInfo.isDirty ? 'dirty-window' : ''} ${
                   isEmbedded ? 'embedded-window' : ''
                 } ${isEmbedded && !isNativeEmbeddedVisible ? 'embedded-overview-window' : ''}`}
                 key={key}
+                title={isCompactOverview ? `${windowInfo.title} — ${windowInfo.processName}` : undefined}
                 style={{
                   left: frame.x,
                   top: frame.y,
@@ -683,13 +772,9 @@ export function CanvasPreview({
                     <span>{windowInfo.processName}</span>
                   </div>
                   <div className="virtual-window-actions" onPointerDown={(event) => event.stopPropagation()}>
-                    {windowInfo.isDirty ? <em>Edited</em> : null}
                     {isEmbedded && !isNativeEmbeddedVisible ? <em>Zoom In</em> : null}
                     {windowInfo.hwnd ? (
                       <>
-                        <button className="work-window-command" title="Work in real window" onClick={() => workInWindow(windowInfo)}>
-                          Work
-                        </button>
                         <button title="Focus real window" onClick={() => runWindowCommand(windowInfo, 'focus')}>
                           <Focus size={11} />
                         </button>

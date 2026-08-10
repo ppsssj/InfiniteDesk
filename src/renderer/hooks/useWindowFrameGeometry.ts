@@ -13,11 +13,9 @@ import {
   HIDDEN_EMBEDDED_WINDOW_X,
   HIDDEN_EMBEDDED_WINDOW_Y,
   INTERACTIVE_EMBED_SCALE,
-  MIN_OVERVIEW_CONTENT_HEIGHT,
-  MIN_OVERVIEW_CONTENT_WIDTH,
   NATIVE_EMBEDDED_VISIBLE_SCALE,
-  OVERVIEW_CONTENT_INSET,
-  OVERVIEW_TITLEBAR_HEIGHT
+  OVERVIEW_FRAME_BORDER_WIDTH,
+  getOverviewChromeMetrics
 } from '../components/CanvasPreview.constants';
 
 export type UseWindowFrameGeometryParams = {
@@ -114,15 +112,11 @@ export function useWindowFrameGeometry({
   ): { width: number; height: number } {
     const sourceWidth = Math.max(1, windowInfo.width);
     const sourceHeight = Math.max(1, windowInfo.height);
-    const previewScale = Math.max(
-      targetTransform.scale,
-      MIN_OVERVIEW_CONTENT_WIDTH / sourceWidth,
-      MIN_OVERVIEW_CONTENT_HEIGHT / sourceHeight
-    );
+    const previewScale = Math.max(0.001, targetTransform.scale);
 
     return {
-      width: Math.round(sourceWidth * previewScale),
-      height: Math.round(sourceHeight * previewScale)
+      width: Math.max(1, Math.round(sourceWidth * previewScale)),
+      height: Math.max(1, Math.round(sourceHeight * previewScale))
     };
   }
 
@@ -144,22 +138,24 @@ export function useWindowFrameGeometry({
     }
 
     const contentSize = getAspectPreservingOverviewContentSize(windowInfo, targetTransform);
+    const chrome = getOverviewChromeMetrics(targetTransform.scale);
 
     return {
       x: position.x,
       y: position.y,
-      width: contentSize.width + OVERVIEW_CONTENT_INSET * 2,
-      height: contentSize.height + OVERVIEW_TITLEBAR_HEIGHT + OVERVIEW_CONTENT_INSET * 2
+      width: contentSize.width + (chrome.contentInset + OVERVIEW_FRAME_BORDER_WIDTH) * 2,
+      height: contentSize.height + chrome.titlebarHeight + (chrome.contentInset + OVERVIEW_FRAME_BORDER_WIDTH) * 2
     };
   }
 
   function getOverviewContentScreenBounds(windowInfo: VirtualWindowState): { x: number; y: number; width: number; height: number } {
     const frame = getFrameScreenBounds(windowInfo);
     const contentSize = getAspectPreservingOverviewContentSize(windowInfo);
+    const chrome = getOverviewChromeMetrics(transform.scale);
 
     return {
-      x: frame.x + OVERVIEW_CONTENT_INSET,
-      y: frame.y + OVERVIEW_TITLEBAR_HEIGHT + OVERVIEW_CONTENT_INSET,
+      x: frame.x + OVERVIEW_FRAME_BORDER_WIDTH + chrome.contentInset,
+      y: frame.y + OVERVIEW_FRAME_BORDER_WIDTH + chrome.titlebarHeight + chrome.contentInset,
       width: contentSize.width,
       height: contentSize.height
     };
@@ -181,10 +177,14 @@ export function useWindowFrameGeometry({
       };
     }
 
+    const canvasRect = canvasRef.current?.getBoundingClientRect();
+    const canvasOffsetX = canvasRect?.left || 0;
+    const canvasOffsetY = canvasRect?.top || 0;
+
     return {
       hwnd: windowInfo.hwnd || '',
-      x: Math.round(frame.x + EMBEDDED_NODE_CONTENT_INSET_X),
-      y: Math.round(frame.y + EMBEDDED_NODE_CONTENT_INSET_TOP),
+      x: Math.round(canvasOffsetX + frame.x + EMBEDDED_NODE_CONTENT_INSET_X),
+      y: Math.round(canvasOffsetY + frame.y + EMBEDDED_NODE_CONTENT_INSET_TOP),
       width: Math.max(1, Math.round(frame.width - EMBEDDED_NODE_CHROME_WIDTH)),
       height: Math.max(1, Math.round(frame.height - EMBEDDED_NODE_CONTENT_INSET_TOP - EMBEDDED_NODE_CONTENT_INSET_BOTTOM))
     };

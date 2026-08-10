@@ -20,7 +20,22 @@ export const NATIVE_EMBEDDED_VISIBLE_SCALE = 0.01;
 export const INTERACTIVE_EMBED_SCALE = 0.78;
 export const HIDDEN_EMBEDDED_WINDOW_X = -30000;
 export const HIDDEN_EMBEDDED_WINDOW_Y = -30000;
-export const OVERVIEW_TITLEBAR_HEIGHT = 38;
-export const OVERVIEW_CONTENT_INSET = 10;
-export const MIN_OVERVIEW_CONTENT_WIDTH = 160;
-export const MIN_OVERVIEW_CONTENT_HEIGHT = 92;
+export const OVERVIEW_TITLEBAR_HEIGHT = 32;
+export const OVERVIEW_CONTENT_INSET = 0;
+export const OVERVIEW_FRAME_BORDER_WIDTH = 1;
+export const COMPACT_OVERVIEW_SCALE = 0.18;
+export const COMPACT_OVERVIEW_CONTENT_INSET = 0;
+
+export function getOverviewChromeMetrics(scale: number): { titlebarHeight: number; contentInset: number } {
+  if (scale < COMPACT_OVERVIEW_SCALE) {
+    return {
+      titlebarHeight: 0,
+      contentInset: COMPACT_OVERVIEW_CONTENT_INSET
+    };
+  }
+
+  return {
+    titlebarHeight: OVERVIEW_TITLEBAR_HEIGHT,
+    contentInset: OVERVIEW_CONTENT_INSET
+  };
+}

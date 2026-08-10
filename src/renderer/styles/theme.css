@@ -307,11 +307,6 @@
   background: var(--control-hover);
 }
 
-.virtual-window-actions .work-window-command {
-  color: #ffffff;
-  background: var(--accent);
-}
-
 .virtual-content,
 .virtual-window.embedded-overview-window .virtual-content {
   background: color-mix(in srgb, var(--panel-solid) 58%, transparent);
