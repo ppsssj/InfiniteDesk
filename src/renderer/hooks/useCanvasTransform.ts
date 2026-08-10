@@ -11,6 +11,7 @@ export type UseCanvasTransformParams = {
   resetViewSignal: number;
   zoomInSignal: number;
   zoomOutSignal: number;
+  actualSizeSignal: number;
   onZoomChange: (scale: number) => void;
 };
 
@@ -22,6 +23,7 @@ export function useCanvasTransform({
   resetViewSignal,
   zoomInSignal,
   zoomOutSignal,
+  actualSizeSignal,
   onZoomChange
 }: UseCanvasTransformParams): {
   transform: CanvasTransform;
@@ -78,6 +80,25 @@ export function useCanvasTransform({
     });
   }
 
+  function showActualSize(): void {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+
+    const rect = canvas.getBoundingClientRect();
+    const screenX = rect.width / 2;
+    const screenY = rect.height / 2;
+    setTransform((current) => {
+      const worldPoint = screenToWorld(screenX, screenY, current);
+      return {
+        scale: 1,
+        offsetX: screenX - worldPoint.x,
+        offsetY: screenY - worldPoint.y
+      };
+    });
+  }
+
   useEffect(() => {
     onZoomChange(transform.scale);
   }, [onZoomChange, transform.scale]);
@@ -101,6 +122,12 @@ export function useCanvasTransform({
       zoomBy(0.88);
     }
   }, [zoomOutSignal]);
+
+  useEffect(() => {
+    if (actualSizeSignal > 0) {
+      showActualSize();
+    }
+  }, [actualSizeSignal]);
 
   return { transform, setTransform, fitView, zoomBy, getDefaultTransform };
 }

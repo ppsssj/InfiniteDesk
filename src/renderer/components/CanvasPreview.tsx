@@ -52,6 +52,7 @@ export function CanvasPreview({
   resetViewSignal,
   zoomInSignal,
   zoomOutSignal,
+  actualSizeSignal,
   cameraFocusRequest,
   onZoomChange
 }: CanvasPreviewProps): React.JSX.Element {
@@ -78,6 +79,7 @@ export function CanvasPreview({
     resetViewSignal,
     zoomInSignal,
     zoomOutSignal,
+    actualSizeSignal,
     onZoomChange
   });
 
@@ -162,7 +164,7 @@ export function CanvasPreview({
 
   useEffect(() => {
     cancelCameraAnimation();
-  }, [fitSignal, resetViewSignal, zoomInSignal, zoomOutSignal]);
+  }, [fitSignal, resetViewSignal, zoomInSignal, zoomOutSignal, actualSizeSignal]);
 
   useEffect(() => {
     if (shouldSuspendNativePreviews) {
@@ -200,7 +202,7 @@ export function CanvasPreview({
       cropWidth: Math.min(1, Math.max(0.0001, visibleBounds.width / previewBounds.width)),
       cropHeight: Math.min(1, Math.max(0.0001, visibleBounds.height / previewBounds.height)),
       visible: true,
-      opacity: 245
+      opacity: 255
     }));
   }
 

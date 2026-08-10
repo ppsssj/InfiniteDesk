@@ -49,6 +49,7 @@ function App(): React.JSX.Element {
   const [resetViewSignal, setResetViewSignal] = useState(0);
   const [zoomInSignal, setZoomInSignal] = useState(0);
   const [zoomOutSignal, setZoomOutSignal] = useState(0);
+  const [actualSizeSignal, setActualSizeSignal] = useState(0);
   const [cameraFocusRequest, setCameraFocusRequest] = useState<{ id: number; hwnd: string } | null>(null);
   const [zoomScale, setZoomScale] = useState(1);
   const [launchingAppId, setLaunchingAppId] = useState<string | null>(null);
@@ -667,6 +668,7 @@ function App(): React.JSX.Element {
           onToggleDrawer={() => setIsDrawerOpen((value) => !value)}
           onZoomIn={() => setZoomInSignal((value) => value + 1)}
           onZoomOut={() => setZoomOutSignal((value) => value + 1)}
+          onActualSize={() => setActualSizeSignal((value) => value + 1)}
           onFit={() => setFitSignal((value) => value + 1)}
         />
       </header>
@@ -698,6 +700,7 @@ function App(): React.JSX.Element {
           resetViewSignal={resetViewSignal}
           zoomInSignal={zoomInSignal}
           zoomOutSignal={zoomOutSignal}
+          actualSizeSignal={actualSizeSignal}
           cameraFocusRequest={cameraFocusRequest}
           onZoomChange={setZoomScale}
         />

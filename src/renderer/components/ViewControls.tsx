@@ -9,6 +9,7 @@ type ViewControlsProps = {
   onToggleDrawer: () => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
+  onActualSize: () => void;
   onFit: () => void;
 };
 
@@ -20,6 +21,7 @@ export function ViewControls({
   onToggleDrawer,
   onZoomIn,
   onZoomOut,
+  onActualSize,
   onFit
 }: ViewControlsProps): React.JSX.Element {
   return (
@@ -44,6 +46,7 @@ export function ViewControls({
       <button className="view-control-detail" title="Zoom in" onClick={onZoomIn}>
         <Plus size={15} />
       </button>
+      <button className="view-control-detail" title="Actual size (sharpest)" onClick={onActualSize}>1:1</button>
       <button className="view-control-detail" onClick={onFit}>Fit</button>
       <button className="view-control-detail" onClick={onToggleDrawer}>{isDrawerOpen ? 'Close' : 'Details'}</button>
     </div>

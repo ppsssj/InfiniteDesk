@@ -28,6 +28,7 @@ export type CanvasPreviewProps = {
   resetViewSignal: number;
   zoomInSignal: number;
   zoomOutSignal: number;
+  actualSizeSignal: number;
   cameraFocusRequest: { id: number; hwnd: string } | null;
   onZoomChange: (scale: number) => void;
 };
