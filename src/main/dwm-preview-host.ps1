@@ -208,6 +208,7 @@ namespace InfiniteDeskPreview {
       }
 
       if (phase == "wheel") {
+        FocusSource(source);
         int wheelParam = (input.wheelDelta & 0xFFFF) << 16;
         PostMessage(target, WM_MOUSEWHEEL, new IntPtr(wheelParam), MakePointParam(screenPoint.x, screenPoint.y));
         return;
@@ -321,6 +322,69 @@ namespace InfiniteDeskPreview {
     }
   }
 
+  public sealed class MouseWheelHook : IDisposable {
+    private const int WH_MOUSE_LL = 14;
+    private const int WM_MOUSEWHEEL = 0x020A;
+    private delegate IntPtr HookProcedure(int code, IntPtr message, IntPtr data);
+    public delegate bool WheelHandler(int screenX, int screenY, int delta);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct HookPoint {
+      public int x;
+      public int y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LowLevelMouseInput {
+      public HookPoint point;
+      public uint mouseData;
+      public uint flags;
+      public uint time;
+      public IntPtr extraInfo;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetWindowsHookEx(int hookId, HookProcedure callback, IntPtr module, uint threadId);
+
+    [DllImport("user32.dll")]
+    private static extern bool UnhookWindowsHookEx(IntPtr hook);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr message, IntPtr data);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetModuleHandle(string moduleName);
+
+    private readonly HookProcedure callback;
+    private readonly WheelHandler handler;
+    private IntPtr hook;
+
+    public MouseWheelHook(WheelHandler handler) {
+      this.handler = handler;
+      callback = HandleHook;
+      hook = SetWindowsHookEx(WH_MOUSE_LL, callback, GetModuleHandle(null), 0);
+    }
+
+    private IntPtr HandleHook(int code, IntPtr message, IntPtr data) {
+      if (code >= 0 && message.ToInt32() == WM_MOUSEWHEEL) {
+        LowLevelMouseInput input = (LowLevelMouseInput)Marshal.PtrToStructure(data, typeof(LowLevelMouseInput));
+        int delta = (short)((input.mouseData >> 16) & 0xFFFF);
+        if (delta != 0 && handler(input.point.x, input.point.y, delta)) {
+          return new IntPtr(1);
+        }
+      }
+      return CallNextHookEx(hook, code, message, data);
+    }
+
+    public void Dispose() {
+      if (hook != IntPtr.Zero) {
+        UnhookWindowsHookEx(hook);
+        hook = IntPtr.Zero;
+      }
+      GC.KeepAlive(callback);
+    }
+  }
+
   public sealed class PreviewForm : Form {
     private const int WS_EX_TOOLWINDOW = 0x00000080;
     private const int WS_EX_NOACTIVATE = 0x08000000;
@@ -343,6 +407,12 @@ namespace InfiniteDeskPreview {
     [DllImport("dwmapi.dll")]
     private static extern int DwmQueryThumbnailSourceSize(IntPtr thumbnail, out DwmSize size);
 
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out Rect bounds, int size);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hwnd, out Rect bounds);
+
     [DllImport("user32.dll", EntryPoint="SetWindowLong")]
     private static extern int SetWindowLong32(IntPtr hWnd, int index, int value);
 
@@ -357,6 +427,7 @@ namespace InfiniteDeskPreview {
     private string pressedButton = "left";
     private double lastNormalizedX;
     private double lastNormalizedY;
+    private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
 
     public IntPtr SourceHwnd {
       get { return sourceHwnd; }
@@ -425,10 +496,11 @@ namespace InfiniteDeskPreview {
       properties.rcDestination = new Rect { left = 0, top = 0, right = bounds.Width, bottom = bounds.Height };
       DwmSize sourceSize;
       if (DwmQueryThumbnailSourceSize(thumbnail, out sourceSize) == 0 && sourceSize.width > 0 && sourceSize.height > 0) {
-        int sourceLeft = Math.Max(0, Math.Min(sourceSize.width - 1, (int)Math.Round(sourceCrop.X * sourceSize.width)));
-        int sourceTop = Math.Max(0, Math.Min(sourceSize.height - 1, (int)Math.Round(sourceCrop.Y * sourceSize.height)));
-        int sourceRight = Math.Max(sourceLeft + 1, Math.Min(sourceSize.width, (int)Math.Round((sourceCrop.X + sourceCrop.Width) * sourceSize.width)));
-        int sourceBottom = Math.Max(sourceTop + 1, Math.Min(sourceSize.height, (int)Math.Round((sourceCrop.Y + sourceCrop.Height) * sourceSize.height)));
+        Point sourceOffset = GetVisibleSourceOffset();
+        int sourceLeft = sourceOffset.X + Math.Max(0, Math.Min(sourceSize.width - 1, (int)Math.Round(sourceCrop.X * sourceSize.width)));
+        int sourceTop = sourceOffset.Y + Math.Max(0, Math.Min(sourceSize.height - 1, (int)Math.Round(sourceCrop.Y * sourceSize.height)));
+        int sourceRight = sourceOffset.X + Math.Max(sourceLeft - sourceOffset.X + 1, Math.Min(sourceSize.width, (int)Math.Round((sourceCrop.X + sourceCrop.Width) * sourceSize.width)));
+        int sourceBottom = sourceOffset.Y + Math.Max(sourceTop - sourceOffset.Y + 1, Math.Min(sourceSize.height, (int)Math.Round((sourceCrop.Y + sourceCrop.Height) * sourceSize.height)));
         properties.dwFlags |= DWM_TNP_RECTSOURCE;
         properties.rcSource = new Rect { left = sourceLeft, top = sourceTop, right = sourceRight, bottom = sourceBottom };
       }
@@ -436,6 +508,19 @@ namespace InfiniteDeskPreview {
       properties.fVisible = true;
       properties.fSourceClientAreaOnly = false;
       DwmUpdateThumbnailProperties(thumbnail, ref properties);
+    }
+
+    private Point GetVisibleSourceOffset() {
+      Rect windowBounds;
+      Rect visibleBounds;
+      if (!GetWindowRect(sourceHwnd, out windowBounds) ||
+          DwmGetWindowAttribute(sourceHwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out visibleBounds, Marshal.SizeOf(typeof(Rect))) != 0) {
+        return new Point(0, 0);
+      }
+
+      int offsetX = visibleBounds.left - windowBounds.left;
+      int offsetY = visibleBounds.top - windowBounds.top;
+      return new Point(Math.Max(0, Math.Min(32, offsetX)), Math.Max(0, Math.Min(32, offsetY)));
     }
 
     protected override void OnMouseDown(MouseEventArgs eventArgs) {
@@ -459,7 +544,17 @@ namespace InfiniteDeskPreview {
     }
 
     protected override void OnMouseWheel(MouseEventArgs eventArgs) {
+      NativePointerRelay.KeepControllerAbove(ownerHwnd);
       RelayMouse(eventArgs, "wheel", "left");
+    }
+
+    public void RelayWheelAtScreenPoint(int screenX, int screenY, int delta) {
+      Point clientPoint = PointToClient(new Point(screenX, screenY));
+      if (clientPoint.X < 0 || clientPoint.Y < 0 || clientPoint.X >= ClientSize.Width || clientPoint.Y >= ClientSize.Height) {
+        return;
+      }
+      NativePointerRelay.KeepControllerAbove(ownerHwnd);
+      RelayMouse(new MouseEventArgs(MouseButtons.None, 0, clientPoint.X, clientPoint.Y, delta), "wheel", "left");
     }
 
     protected override void OnMouseCaptureChanged(EventArgs eventArgs) {
@@ -549,10 +644,12 @@ namespace InfiniteDeskPreview {
     private readonly object pendingSyncLock = new object();
     private PreviewCommand pendingSyncCommand;
     private bool syncDispatchScheduled;
+    private readonly MouseWheelHook mouseWheelHook;
 
     public PreviewContext() {
       invoker.CreateControl();
       IntPtr ignored = invoker.Handle;
+      mouseWheelHook = new MouseWheelHook(TryRelayMouseWheel);
       windowWatchTimer.Interval = 700;
       windowWatchTimer.Tick += delegate(object sender, EventArgs args) { DetectClosedSources(); };
       windowWatchTimer.Start();
@@ -598,6 +695,7 @@ namespace InfiniteDeskPreview {
       string action = command.action == null ? "" : command.action.ToLowerInvariant();
       if (action == "exit") {
         windowWatchTimer.Stop();
+        mouseWheelHook.Dispose();
         ClearForms(true);
         ExitThread();
         return;
@@ -654,6 +752,20 @@ namespace InfiniteDeskPreview {
       foreach (string id in staleIds) {
         forms[id].HidePreview();
       }
+    }
+
+    private bool TryRelayMouseWheel(int screenX, int screenY, int delta) {
+      foreach (PreviewForm form in forms.Values) {
+        if (!form.IsDisposed && form.Visible && form.Bounds.Contains(screenX, screenY)) {
+          form.BeginInvoke(new Action(delegate() {
+            if (!form.IsDisposed) {
+              form.RelayWheelAtScreenPoint(screenX, screenY, delta);
+            }
+          }));
+          return true;
+        }
+      }
+      return false;
     }
 
     private void DetectClosedSources() {
