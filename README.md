@@ -9,13 +9,15 @@ InfiniteDesk는 **지금 실행 중인 Windows 앱 창들을 한 화면에서 �
 
 ## 데모
 
-![InfiniteDesk demo](docs/video/infinitedesk-demo-cropped-clean.gif)
+![InfiniteDesk demo](docs/video/infinitedesk_demo.gif)
 
-[MP4 데모 영상 보기](docs/video/Infinitedesk-demo.mp4)
+[MP4 데모 영상 보기](docs/video/infinitedesk_demo.mp4)
 
 ![InfiniteDesk workspace](docs/assets/workspace-screenshot1.png)
 
 ![InfiniteDesk dock and app search](docs/assets/workspace-screenshot2.png)
+
+![InfiniteDesk dark workspace](docs/assets/workspace-screenshot_dark.png)
 
 ## 무엇을 할 수 있나
 
@@ -168,9 +170,10 @@ docs/
   assets/
     workspace-screenshot1.png
     workspace-screenshot2.png
+    workspace-screenshot_dark.png
   video/
-    Infinitedesk-demo.mp4
-    infinitedesk-demo-cropped-clean.gif
+    infinitedesk_demo.mp4
+    infinitedesk_demo.gif
 ```
 
 ## 현재 한계
