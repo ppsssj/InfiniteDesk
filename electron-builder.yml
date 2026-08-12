@@ -1,0 +1,34 @@
+appId: com.infinitedesk.app
+productName: InfiniteDesk
+
+directories:
+  output: release
+  buildResources: resources
+
+files:
+  - out/**/*
+  - package.json
+  - "!node_modules/**"
+
+asar: true
+npmRebuild: false
+
+extraResources:
+  - from: src/main/dwm-preview-host.ps1
+    to: dwm-preview-host.ps1
+  - from: src/main/window-control-host.ps1
+    to: window-control-host.ps1
+  - from: resources/icons
+    to: icons
+
+win:
+  icon: resources/icons/icon.ico
+  executableName: InfiniteDesk
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: InfiniteDesk
