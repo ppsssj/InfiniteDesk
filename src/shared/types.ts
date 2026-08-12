@@ -95,6 +95,7 @@ export type RelayPointerInput = {
   action: 'down' | 'move' | 'up' | 'cancel' | 'wheel';
   button?: 'left' | 'right' | 'middle';
   buttons?: number;
+  clickCount?: number;
   wheelDelta?: number;
 };
 

@@ -306,6 +306,7 @@ ipcMain.handle('window:relay-pointer', async (event, input: RelayPointerInput): 
       phase: input.action,
       button: input.button || 'left',
       buttons: Math.max(0, Math.round(input.buttons || 0)),
+      clickCount: Math.max(1, Math.min(2, Math.round(input.clickCount || 1))),
       wheelDelta: Math.round(input.wheelDelta || 0)
     }
   });

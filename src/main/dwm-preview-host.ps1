@@ -48,6 +48,7 @@ namespace InfiniteDeskPreview {
     public string phase { get; set; }
     public string button { get; set; }
     public int buttons { get; set; }
+    public int clickCount { get; set; }
     public int wheelDelta { get; set; }
     public string controllerHwnd { get; set; }
   }
@@ -86,10 +87,13 @@ namespace InfiniteDeskPreview {
     private const uint WM_MOUSEMOVE = 0x0200;
     private const uint WM_LBUTTONDOWN = 0x0201;
     private const uint WM_LBUTTONUP = 0x0202;
+    private const uint WM_LBUTTONDBLCLK = 0x0203;
     private const uint WM_RBUTTONDOWN = 0x0204;
     private const uint WM_RBUTTONUP = 0x0205;
+    private const uint WM_RBUTTONDBLCLK = 0x0206;
     private const uint WM_MBUTTONDOWN = 0x0207;
     private const uint WM_MBUTTONUP = 0x0208;
+    private const uint WM_MBUTTONDBLCLK = 0x0209;
     private const uint WM_MOUSEWHEEL = 0x020A;
     private const int MK_LBUTTON = 0x0001;
     private const int MK_RBUTTON = 0x0002;
@@ -98,6 +102,8 @@ namespace InfiniteDeskPreview {
     private const byte VK_UP = 0x26;
     private const byte VK_DOWN = 0x28;
     private const uint KEYEVENTF_KEYUP = 0x0002;
+    private const int SM_CXDOUBLECLK = 36;
+    private const int SM_CYDOUBLECLK = 37;
     private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
     private static readonly HashSet<string> AccessibleWheelProcesses = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
       "chrome",
@@ -111,6 +117,13 @@ namespace InfiniteDeskPreview {
 
     private static readonly Dictionary<long, IntPtr> capturedTargets = new Dictionary<long, IntPtr>();
     private static readonly Dictionary<long, int> capturedButtons = new Dictionary<long, int>();
+    private sealed class ClickState {
+      public IntPtr target;
+      public string button;
+      public Point screenPoint;
+      public long timestamp;
+    }
+    private static readonly Dictionary<long, ClickState> lastClicks = new Dictionary<long, ClickState>();
     private sealed class CodeEditorTarget {
       public AutomationElement input;
       public System.Windows.Rect bounds;
@@ -172,6 +185,12 @@ namespace InfiniteDeskPreview {
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
 
     [DllImport("user32.dll")]
+    private static extern uint GetDoubleClickTime();
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int index);
+
+    [DllImport("user32.dll")]
     private static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
 
     [StructLayout(LayoutKind.Sequential)]
@@ -230,7 +249,9 @@ namespace InfiniteDeskPreview {
         int buttonMask = ButtonMask(input.button);
         capturedTargets[sourceKey] = target;
         capturedButtons[sourceKey] = buttonMask;
-        PostMessage(target, DownMessage(input.button), new IntPtr(buttonMask), pointParam);
+        int clickCount = ResolveClickCount(sourceKey, target, input.button, screenPoint, input.clickCount);
+        uint message = clickCount >= 2 ? DoubleClickMessage(input.button) : DownMessage(input.button);
+        PostMessage(target, message, new IntPtr(buttonMask), pointParam);
         return;
       }
 
@@ -313,17 +334,24 @@ namespace InfiniteDeskPreview {
 
       string processName = GetProcessName(source);
       if (String.Equals(processName, "code", StringComparison.OrdinalIgnoreCase)) {
+        // VS Code extension surfaces such as Codex are scrollable webviews, not
+        // Monaco editor instances. Prefer the scrollable UIA element directly
+        // under the pointer, then keep the editor-specific keyboard fallback.
+        if (TryScrollAutomation(source, screenPoint, wheelDelta, true)) {
+          return true;
+        }
         return TryScrollCodeEditor(source, controller, screenPoint, wheelDelta);
       }
-      return AccessibleWheelProcesses.Contains(processName) && TryScrollAutomation(source, screenPoint, wheelDelta);
+      return AccessibleWheelProcesses.Contains(processName) && TryScrollAutomation(source, screenPoint, wheelDelta, false);
     }
 
-    private static bool TryScrollAutomation(IntPtr source, Point screenPoint, int wheelDelta) {
+    private static bool TryScrollAutomation(IntPtr source, Point screenPoint, int wheelDelta, bool requirePointMatch) {
       try {
         AutomationElement root = AutomationElement.FromHandle(source);
         Condition condition = new PropertyCondition(AutomationElement.IsScrollPatternAvailableProperty, true);
         AutomationElementCollection candidates = root.FindAll(TreeScope.Descendants, condition);
         AutomationElement selected = null;
+        AutomationElement fallback = null;
         double selectedArea = Double.MaxValue;
 
         for (int index = 0; index < candidates.Count; index++) {
@@ -337,16 +365,22 @@ namespace InfiniteDeskPreview {
           if (!pattern.Current.VerticallyScrollable) {
             continue;
           }
+          if (fallback == null) {
+            fallback = candidate;
+          }
 
           System.Windows.Rect bounds = candidate.Current.BoundingRectangle;
           bool containsPoint = !bounds.IsEmpty &&
             screenPoint.x >= bounds.Left && screenPoint.x < bounds.Right &&
             screenPoint.y >= bounds.Top && screenPoint.y < bounds.Bottom;
           double area = bounds.IsEmpty ? Double.MaxValue : bounds.Width * bounds.Height;
-          if ((containsPoint && area < selectedArea) || (selected == null && !containsPoint)) {
+          if (containsPoint && area < selectedArea) {
             selected = candidate;
-            selectedArea = containsPoint ? area : Double.MaxValue;
+            selectedArea = area;
           }
+        }
+        if (selected == null && !requirePointMatch) {
+          selected = fallback;
         }
         if (selected == null) {
           return false;
@@ -494,6 +528,37 @@ namespace InfiniteDeskPreview {
       return capturedButtons.TryGetValue(sourceKey, out value) ? value : 0;
     }
 
+    private static int ResolveClickCount(long sourceKey, IntPtr target, string button, Point screenPoint, int reportedClickCount) {
+      string normalizedButton = String.IsNullOrWhiteSpace(button) ? "left" : button.ToLowerInvariant();
+      long now = Stopwatch.GetTimestamp();
+      ClickState previous;
+      bool isDoubleClick = reportedClickCount >= 2;
+
+      if (!isDoubleClick && lastClicks.TryGetValue(sourceKey, out previous)) {
+        long maximumTicks = Math.Max(1L, (long)Math.Ceiling(GetDoubleClickTime() * Stopwatch.Frequency / 1000.0));
+        int maximumXDistance = Math.Max(1, GetSystemMetrics(SM_CXDOUBLECLK) / 2);
+        int maximumYDistance = Math.Max(1, GetSystemMetrics(SM_CYDOUBLECLK) / 2);
+        isDoubleClick = previous.target == target &&
+          String.Equals(previous.button, normalizedButton, StringComparison.Ordinal) &&
+          now - previous.timestamp >= 0 && now - previous.timestamp <= maximumTicks &&
+          Math.Abs(screenPoint.x - previous.screenPoint.x) <= maximumXDistance &&
+          Math.Abs(screenPoint.y - previous.screenPoint.y) <= maximumYDistance;
+      }
+
+      if (isDoubleClick) {
+        lastClicks.Remove(sourceKey);
+        return 2;
+      }
+
+      lastClicks[sourceKey] = new ClickState {
+        target = target,
+        button = normalizedButton,
+        screenPoint = screenPoint,
+        timestamp = now
+      };
+      return 1;
+    }
+
     private static int ButtonMask(string button) {
       string normalized = String.IsNullOrWhiteSpace(button) ? "left" : button.ToLowerInvariant();
       if (normalized == "right") return MK_RBUTTON;
@@ -514,6 +579,13 @@ namespace InfiniteDeskPreview {
       if (normalized == "right") return WM_RBUTTONDOWN;
       if (normalized == "middle") return WM_MBUTTONDOWN;
       return WM_LBUTTONDOWN;
+    }
+
+    private static uint DoubleClickMessage(string button) {
+      string normalized = String.IsNullOrWhiteSpace(button) ? "left" : button.ToLowerInvariant();
+      if (normalized == "right") return WM_RBUTTONDBLCLK;
+      if (normalized == "middle") return WM_MBUTTONDBLCLK;
+      return WM_LBUTTONDBLCLK;
     }
 
     private static uint UpMessage(string button) {
@@ -808,6 +880,7 @@ namespace InfiniteDeskPreview {
         phase = phase,
         button = button,
         buttons = GetButtons(eventArgs.Button),
+        clickCount = Math.Max(1, eventArgs.Clicks),
         wheelDelta = eventArgs.Delta,
         controllerHwnd = HwndToString(ownerHwnd)
       });
