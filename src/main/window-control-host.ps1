@@ -239,7 +239,14 @@ function Test-IsInfiniteDeskWindow {
 function Get-OpenWindows {
   $windows = New-Object System.Collections.Generic.List[object]
   $ignoredClasses = @("Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Windows.UI.Core.CoreWindow")
-  $ignoredProcesses = @("TextInputHost")
+  # Transient system surfaces are not useful workspace windows. In particular,
+  # the Windows capture overlay can briefly expose a titled top-level window
+  # while selecting an area, which otherwise looks like a newly launched app.
+  $ignoredProcesses = @(
+    "TextInputHost",
+    "ScreenClippingHost",
+    "SnippingTool"
+  )
   $virtualScreen = Get-VirtualScreenRect
 
   [WinApi]::EnumWindows({
