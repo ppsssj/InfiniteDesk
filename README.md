@@ -21,7 +21,7 @@ InfiniteDesk는 **지금 실행 중인 Windows 앱 창들을 한 화면에서 �
 
 ![InfiniteDesk dock and app search](docs/assets/workspace-screenshot2.png)
 
-![InfiniteDesk dark workspace](docs/assets/workspace-screenshot_dark.png)
+![InfiniteDesk dark workspace](docs/assets/workspace-screenshot-dark.png)
 
 ## 무엇을 할 수 있나
 
@@ -140,8 +140,29 @@ npm run dev
 
 ```bash
 npm run typecheck
+npm test
 npm run build
 ```
+
+### Windows 패키징
+
+```bash
+# 설치 없이 패키징 결과 확인
+npm run package:dir
+
+# NSIS 설치 프로그램 생성
+npm run package:win
+
+# 단일 포터블 실행 파일 생성
+npm run package:portable
+```
+
+생성된 파일은 `release/`에 저장됩니다. 공개 배포본은 Windows 코드 서명을 적용한 뒤 배포하는 것을 권장합니다.
+
+## 개인정보와 보안
+
+- [개인정보 처리 안내](PRIVACY.md)
+- [보안 취약점 신고 정책](SECURITY.md)
 
 ## 단축키
 
@@ -174,7 +195,7 @@ docs/
   assets/
     workspace-screenshot1.png
     workspace-screenshot2.png
-    workspace-screenshot_dark.png
+    workspace-screenshot-dark.png
   video/
     infinitedesk_demo.mp4
     infinitedesk_demo.gif
