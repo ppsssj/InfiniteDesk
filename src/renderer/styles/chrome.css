@@ -91,6 +91,13 @@
   background: var(--control-hover);
 }
 
+.brand-logo-mark {
+  display: block;
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+}
+
 .brand-menu {
   position: static;
   grid-column: 1 / -1;

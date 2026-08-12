@@ -1,5 +1,6 @@
 import React from 'react';
-import { BriefcaseBusiness, Layers, LocateFixed, LogOut, Menu, Palette, RefreshCw, RotateCcw, Save, Send } from 'lucide-react';
+import { BriefcaseBusiness, LocateFixed, LogOut, Menu, Palette, RefreshCw, RotateCcw, Save, Send } from 'lucide-react';
+import logoMarkUrl from '../assets/logo-mark.png';
 
 type BrandMenuProps = {
   isOpen: boolean;
@@ -39,7 +40,7 @@ export function BrandMenu({
   return (
     <div className="floating-brand" data-dwm-ui-overlay="true">
       <button className="brand-pill" title="InfiniteDesk menu" aria-label="InfiniteDesk menu" onClick={onToggle}>
-        <Layers size={18} />
+        <img className="brand-logo-mark" src={logoMarkUrl} alt="" />
       </button>
       {isOpen ? (
         <div className="brand-menu" data-dwm-ui-overlay="true">

@@ -1,5 +1,9 @@
 # InfiniteDesk
 
+<p align="center">
+  <img src="docs/assets/logo-concept.png" alt="InfiniteDesk logo concept" width="320" />
+</p>
+
 InfiniteDesk는 **지금 실행 중인 Windows 앱 창들을 한 화면에서 보고, 정리하고, 직접 조작할 수 있는 데스크톱 컨트롤러**입니다.
 
 예를 들어 VS Code, 브라우저, OBS처럼 이미 켜져 있는 다른 프로그램 창들을 InfiniteDesk 안의 Workspace에서 한눈에 보고, 창 위치를 바꾸고, 실제 Windows 창에 포커스/최소화/최대화 같은 명령을 보낼 수 있습니다.

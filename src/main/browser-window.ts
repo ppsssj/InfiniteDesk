@@ -51,6 +51,7 @@ export function createWindow(): void {
     minWidth: minimumSize.minWidth,
     minHeight: minimumSize.minHeight,
     title: 'InfiniteDesk',
+    icon: join(app.getAppPath(), 'resources/icons/icon.ico'),
     backgroundColor: '#00000000',
     transparent: true,
     autoHideMenuBar: true,
