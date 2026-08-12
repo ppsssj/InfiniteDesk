@@ -685,6 +685,24 @@ namespace InfiniteDeskPreview {
     private const int DWM_TNP_VISIBLE = 0x00000008;
     private const int DWM_TNP_SOURCECLIENTAREAONLY = 0x00000010;
     private const int GWLP_HWNDPARENT = -8;
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOMOVE = 0x0002;
+    private const uint SWP_NOACTIVATE = 0x0010;
+    private const uint SWP_SHOWWINDOW = 0x0040;
+    private const int GWL_EXSTYLE = -20;
+    private const long WS_EX_TOPMOST = 0x00000008L;
+    private const int SW_SHOWNOACTIVATE = 4;
+    private static readonly IntPtr HWND_TOP = IntPtr.Zero;
+    private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    private static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+    private static readonly HashSet<string> BrowserProcessesKeptRendered = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+      "chrome",
+      "chromium",
+      "msedge",
+      "brave",
+      "vivaldi",
+      "opera"
+    };
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmRegisterThumbnail(IntPtr hwndDestination, IntPtr hwndSource, out IntPtr thumbnail);
@@ -699,10 +717,22 @@ namespace InfiniteDeskPreview {
     private static extern int DwmQueryThumbnailSourceSize(IntPtr thumbnail, out DwmSize size);
 
     [DllImport("dwmapi.dll")]
+    private static extern int DwmFlush();
+
+    [DllImport("dwmapi.dll")]
     private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out Rect bounds, int size);
 
     [DllImport("user32.dll")]
     private static extern bool GetWindowRect(IntPtr hwnd, out Rect bounds);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hwnd, int command);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
 
     [DllImport("user32.dll", EntryPoint="SetWindowLong")]
     private static extern int SetWindowLong32(IntPtr hWnd, int index, int value);
@@ -710,10 +740,24 @@ namespace InfiniteDeskPreview {
     [DllImport("user32.dll", EntryPoint="SetWindowLongPtr")]
     private static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int index, IntPtr value);
 
+    [DllImport("user32.dll", EntryPoint="GetWindowLong")]
+    private static extern int GetWindowLong32(IntPtr hWnd, int index);
+
+    [DllImport("user32.dll", EntryPoint="GetWindowLongPtr")]
+    private static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int index);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+
     private IntPtr thumbnail = IntPtr.Zero;
     private IntPtr sourceHwnd = IntPtr.Zero;
     private IntPtr ownerHwnd = IntPtr.Zero;
     private RectangleF currentSourceCrop = new RectangleF(0, 0, 1, 1);
+    private IntPtr desiredSourceHwnd = IntPtr.Zero;
+    private Rectangle desiredBounds = Rectangle.Empty;
+    private RectangleF desiredSourceCrop = new RectangleF(0, 0, 1, 1);
+    private byte desiredOpacity = 255;
+    private bool desiredOwnerIsTopmost;
     private bool pointerIsDown;
     private string pressedButton = "left";
     private double lastNormalizedX;
@@ -760,16 +804,47 @@ namespace InfiniteDeskPreview {
       }
     }
 
-    public void UpdatePreview(IntPtr nextSourceHwnd, Rectangle bounds, RectangleF sourceCrop, byte nextOpacity) {
+    public static bool BringOwnerForward(IntPtr ownerHwnd) {
+      if (ownerHwnd == IntPtr.Zero) {
+        return false;
+      }
+      long exStyle = IntPtr.Size == 8
+        ? GetWindowLongPtr64(ownerHwnd, GWL_EXSTYLE).ToInt64()
+        : GetWindowLong32(ownerHwnd, GWL_EXSTYLE);
+      bool ownerIsTopmost = (exStyle & WS_EX_TOPMOST) != 0;
+      SetWindowPos(
+        ownerHwnd,
+        ownerIsTopmost ? HWND_TOPMOST : HWND_TOP,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+      );
+      return ownerIsTopmost;
+    }
+
+    public void UpdatePreview(IntPtr nextSourceHwnd, Rectangle bounds, RectangleF sourceCrop, byte nextOpacity, bool ownerIsTopmost) {
       if (bounds.Width <= 1 || bounds.Height <= 1 || nextSourceHwnd == IntPtr.Zero) {
         HidePreview();
         return;
       }
 
+      desiredSourceHwnd = nextSourceHwnd;
+      desiredBounds = bounds;
+      desiredSourceCrop = sourceCrop;
+      desiredOpacity = nextOpacity;
+      desiredOwnerIsTopmost = ownerIsTopmost;
       Bounds = bounds;
       currentSourceCrop = sourceCrop;
-      if (!Visible) {
-        Show();
+
+      // Chromium stops producing its web-content composition surface while a
+      // top-level window is minimized. Restore it without activation so DWM
+      // thumbnails keep receiving live page frames, then return the controller
+      // to the front of its current z-order band.
+      if (RestoreBrowserSourceWithoutActivation(nextSourceHwnd)) {
+        ownerIsTopmost = BringOwnerForward(ownerHwnd);
+        desiredOwnerIsTopmost = ownerIsTopmost;
       }
 
       if (thumbnail == IntPtr.Zero || sourceHwnd != nextSourceHwnd) {
@@ -777,7 +852,8 @@ namespace InfiniteDeskPreview {
         sourceHwnd = nextSourceHwnd;
         int registerResult = DwmRegisterThumbnail(Handle, sourceHwnd, out thumbnail);
         if (registerResult != 0 || thumbnail == IntPtr.Zero) {
-          HidePreview();
+          UnregisterThumbnail();
+          HideWindowOnly();
           return;
         }
       }
@@ -798,7 +874,90 @@ namespace InfiniteDeskPreview {
       properties.opacity = nextOpacity;
       properties.fVisible = true;
       properties.fSourceClientAreaOnly = false;
-      DwmUpdateThumbnailProperties(thumbnail, ref properties);
+      int updateResult = DwmUpdateThumbnailProperties(thumbnail, ref properties);
+      if (updateResult != 0) {
+        UnregisterThumbnail();
+        HideWindowOnly();
+        return;
+      }
+      bool wasHidden = !Visible;
+      if (wasHidden) {
+        Show();
+      }
+      // Keep previews in the same z-order band as their Electron owner. Making
+      // only the previews permanently topmost leaves them floating over other
+      // apps when a newly launched process moves the controller behind itself.
+      SetWindowPos(
+        Handle,
+        ownerIsTopmost ? HWND_TOPMOST : HWND_NOTOPMOST,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW
+      );
+      if (wasHidden) {
+        // DWM can defer an update issued while the destination is hidden.
+        // Re-apply once the native destination is visible and wait for the
+        // next composition pass so a newly-created source appears promptly.
+        DwmUpdateThumbnailProperties(thumbnail, ref properties);
+        DwmFlush();
+      }
+    }
+
+    public void MaintainSourceRendering() {
+      if (!RestoreBrowserSourceWithoutActivation(sourceHwnd)) {
+        return;
+      }
+
+      bool ownerIsTopmost = BringOwnerForward(ownerHwnd);
+      desiredOwnerIsTopmost = ownerIsTopmost;
+      if (IsHandleCreated) {
+        SetWindowPos(
+          Handle,
+          ownerIsTopmost ? HWND_TOPMOST : HWND_NOTOPMOST,
+          0,
+          0,
+          0,
+          0,
+          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW
+        );
+      }
+    }
+
+    private static bool RestoreBrowserSourceWithoutActivation(IntPtr sourceHwnd) {
+      if (sourceHwnd == IntPtr.Zero || !IsIconic(sourceHwnd)) {
+        return false;
+      }
+
+      uint processId;
+      GetWindowThreadProcessId(sourceHwnd, out processId);
+      if (processId == 0) {
+        return false;
+      }
+
+      string processName;
+      try {
+        processName = Process.GetProcessById((int)processId).ProcessName;
+      } catch {
+        return false;
+      }
+      if (!BrowserProcessesKeptRendered.Contains(processName)) {
+        return false;
+      }
+
+      ShowWindow(sourceHwnd, SW_SHOWNOACTIVATE);
+      return !IsIconic(sourceHwnd);
+    }
+
+    public void RetryPendingPreview() {
+      if (desiredSourceHwnd == IntPtr.Zero) {
+        return;
+      }
+      if (thumbnail != IntPtr.Zero) {
+        return;
+      }
+      UpdatePreview(desiredSourceHwnd, desiredBounds, desiredSourceCrop, desiredOpacity, desiredOwnerIsTopmost);
     }
 
     private Point GetVisibleSourceOffset() {
@@ -905,6 +1064,11 @@ namespace InfiniteDeskPreview {
     }
 
     public void HidePreview() {
+      desiredSourceHwnd = IntPtr.Zero;
+      HideWindowOnly();
+    }
+
+    private void HideWindowOnly() {
       if (Visible) {
         Hide();
       }
@@ -943,8 +1107,8 @@ namespace InfiniteDeskPreview {
       invoker.CreateControl();
       IntPtr ignored = invoker.Handle;
       mouseWheelHook = new MouseWheelHook(TryRelayMouseWheel);
-      windowWatchTimer.Interval = 700;
-      windowWatchTimer.Tick += delegate(object sender, EventArgs args) { DetectClosedSources(); };
+      windowWatchTimer.Interval = 250;
+      windowWatchTimer.Tick += delegate(object sender, EventArgs args) { MaintainPreviews(); };
       windowWatchTimer.Start();
     }
 
@@ -1009,6 +1173,7 @@ namespace InfiniteDeskPreview {
       }
 
       IntPtr ownerHwnd = ParseHwnd(command.ownerHwnd);
+      bool ownerIsTopmost = PreviewForm.BringOwnerForward(ownerHwnd);
       HashSet<string> seen = new HashSet<string>();
       if (command.previews != null) {
         foreach (PreviewItem item in command.previews) {
@@ -1032,7 +1197,7 @@ namespace InfiniteDeskPreview {
           IntPtr sourceHwnd = ParseHwnd(item.hwnd);
           byte opacity = item.opacity <= 0 ? (byte)255 : (byte)Math.Min(255, item.opacity);
           RectangleF sourceCrop = new RectangleF((float)item.cropX, (float)item.cropY, (float)item.cropWidth, (float)item.cropHeight);
-          form.UpdatePreview(sourceHwnd, new Rectangle(item.x, item.y, item.width, item.height), sourceCrop, opacity);
+          form.UpdatePreview(sourceHwnd, new Rectangle(item.x, item.y, item.width, item.height), sourceCrop, opacity, ownerIsTopmost);
         }
       }
 
@@ -1061,15 +1226,18 @@ namespace InfiniteDeskPreview {
       return false;
     }
 
-    private void DetectClosedSources() {
+    private void MaintainPreviews() {
       foreach (PreviewForm form in forms.Values) {
         IntPtr source = form.SourceHwnd;
         if (source == IntPtr.Zero) {
+          form.RetryPendingPreview();
           continue;
         }
         long sourceValue = source.ToInt64();
         if (NativePointerRelay.IsValidWindow(source)) {
           reportedClosedSources.Remove(sourceValue);
+          form.MaintainSourceRendering();
+          form.RetryPendingPreview();
           continue;
         }
         if (reportedClosedSources.Add(sourceValue)) {

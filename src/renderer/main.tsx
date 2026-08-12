@@ -28,7 +28,9 @@ import './styles/base.css';
 import './styles/theme.css';
 import './styles/chrome.css';
 
-const AUTO_WINDOW_SCAN_INTERVAL_MS = 1800;
+const AUTO_WINDOW_SCAN_INTERVAL_MS = 700;
+const INTERACTION_SCAN_DELAYS_MS = [120, 400, 900, 1600] as const;
+const DOCK_LAUNCH_SCAN_DELAYS_MS = [100, 250, 500, 900, 1500, 2400] as const;
 
 function App(): React.JSX.Element {
   const [windows, setWindows] = useState<DetectedWindow[]>([]);
@@ -195,58 +197,96 @@ function App(): React.JSX.Element {
   }
 
   async function scanAfterLaunch(dockApp: DockApp): Promise<void> {
-    await new Promise((resolve) => {
-      window.setTimeout(resolve, 1400);
-    });
+    const startedAt = Date.now();
+    const regionIdAtLaunch = selectedRegionId;
+    const hwndsAtLaunch = new Set(
+      virtualWindowsRef.current.flatMap((windowInfo) => (windowInfo.hwnd ? [windowInfo.hwnd.toLowerCase()] : []))
+    );
 
-    const activeRegion = selectedRegionId ? regions.find((region) => region.id === selectedRegionId) || null : null;
-    if (!activeRegion) {
-      await scanForNewWindows('', dockApp);
-      return;
-    }
-
-    try {
-      const detected = await window.infiniteDesk.scanWindows();
-      setWindows(detected);
-
-      const knownHwnds = new Set(virtualWindows.flatMap((windowInfo) => (windowInfo.hwnd ? [windowInfo.hwnd] : [])));
-      const matchedDetectedWindow =
-        detected.find((windowInfo) => processMatchesDockApp(windowInfo, dockApp) && windowInfo.hwnd && !knownHwnds.has(windowInfo.hwnd)) ||
-        detected.find((windowInfo) => processMatchesDockApp(windowInfo, dockApp));
-      const matchedVirtualWindow = matchedDetectedWindow ? toVirtualWindow(matchedDetectedWindow) : null;
-
-      if (!matchedVirtualWindow) {
-        const layout = createInitialVirtualLayout(detected);
-        loadVirtualLayout(layout, regions, null);
-        setSelectedRegionId(activeRegion.id);
-        setMessage(`Launched ${dockApp.name}, but no matching window was found for ${dockApp.processName || dockApp.id}.`);
-        return;
+    for (const targetDelay of DOCK_LAUNCH_SCAN_DELAYS_MS) {
+      const remainingDelay = targetDelay - (Date.now() - startedAt);
+      if (remainingDelay > 0) {
+        await new Promise((resolve) => window.setTimeout(resolve, remainingDelay));
       }
 
-      const nextWindow = placeVirtualWindowInRegion(matchedVirtualWindow, activeRegion, activeRegion.windowIds.length);
-      const nextWindows = [
-        ...virtualWindows.filter((windowInfo) => getWindowIdentity(windowInfo) !== getWindowIdentity(nextWindow)),
-        nextWindow
-      ];
-      const nextRegions = updateRegionMembership(nextWindows, regions);
-      setVirtualWindows(nextWindows);
-      setInitialVirtualWindows((current) => [
-        ...current.filter((windowInfo) => getWindowIdentity(windowInfo) !== getWindowIdentity(nextWindow)),
-        {
-          ...nextWindow,
-          initialVirtualX: nextWindow.virtualX,
-          initialVirtualY: nextWindow.virtualY,
-          isDirty: false
+      if (!regionIdAtLaunch) {
+        await scanForNewWindows('', dockApp);
+        const matchingNewWindow = virtualWindowsRef.current.find(
+          (windowInfo) =>
+            processMatchesDockApp(virtualWindowToDetected(windowInfo), dockApp) &&
+            Boolean(windowInfo.hwnd) &&
+            !hwndsAtLaunch.has(windowInfo.hwnd!.toLowerCase())
+        );
+        if (matchingNewWindow) {
+          focusCameraOnWindow(matchingNewWindow?.hwnd);
+          return;
         }
-      ]);
-      setRegions(nextRegions);
-      setPreviewTemplate(null);
-      setSelectedRegionId(activeRegion.id);
-      focusCameraOnWindow(nextWindow.hwnd);
-      setMessage(`${dockApp.name} added to ${activeRegion.name}.`);
-    } catch (scanError) {
-      setError(`${dockApp.name} launched, but scanning failed: ${(scanError as Error).message}`);
+        continue;
+      }
+
+      if (autoScanInFlightRef.current) {
+        continue;
+      }
+
+      autoScanInFlightRef.current = true;
+      try {
+        const detected = await window.infiniteDesk.scanWindows();
+        const isFinalAttempt = targetDelay === DOCK_LAUNCH_SCAN_DELAYS_MS[DOCK_LAUNCH_SCAN_DELAYS_MS.length - 1];
+        const matchedDetectedWindow =
+          detected.find(
+            (windowInfo) =>
+              processMatchesDockApp(windowInfo, dockApp) &&
+              Boolean(windowInfo.hwnd) &&
+              !hwndsAtLaunch.has(windowInfo.hwnd.toLowerCase())
+          ) ||
+          (isFinalAttempt ? detected.find((windowInfo) => processMatchesDockApp(windowInfo, dockApp)) : undefined);
+        const matchedVirtualWindow = matchedDetectedWindow ? toVirtualWindow(matchedDetectedWindow) : null;
+        if (!matchedVirtualWindow) {
+          continue;
+        }
+
+        setWindows(detected);
+        const activeRegion = regionsRef.current.find((region) => region.id === regionIdAtLaunch);
+        if (!activeRegion) {
+          return;
+        }
+
+        const nextWindow = placeVirtualWindowInRegion(matchedVirtualWindow, activeRegion, activeRegion.windowIds.length);
+        const currentWindows = virtualWindowsRef.current;
+        const nextWindows = [
+          ...currentWindows.filter((windowInfo) => getWindowIdentity(windowInfo) !== getWindowIdentity(nextWindow)),
+          nextWindow
+        ];
+        const nextInitialWindows = [
+          ...initialVirtualWindowsRef.current.filter(
+            (windowInfo) => getWindowIdentity(windowInfo) !== getWindowIdentity(nextWindow)
+          ),
+          { ...nextWindow, initialVirtualX: nextWindow.virtualX, initialVirtualY: nextWindow.virtualY, isDirty: false }
+        ];
+        const nextRegions = updateRegionMembership(nextWindows, regionsRef.current);
+        virtualWindowsRef.current = nextWindows;
+        initialVirtualWindowsRef.current = nextInitialWindows;
+        regionsRef.current = nextRegions;
+        setVirtualWindows(nextWindows);
+        setInitialVirtualWindows(nextInitialWindows);
+        setRegions(nextRegions);
+        setPreviewTemplate(null);
+        setPreviewWorkspace(null);
+        setSelectedRegionId(activeRegion.id);
+        focusCameraOnWindow(nextWindow.hwnd);
+        setMessage(`${dockApp.name} added to ${activeRegion.name}.`);
+        return;
+      } catch (scanError) {
+        if (targetDelay === DOCK_LAUNCH_SCAN_DELAYS_MS[DOCK_LAUNCH_SCAN_DELAYS_MS.length - 1]) {
+          setError(`${dockApp.name} launched, but scanning failed: ${(scanError as Error).message}`);
+          return;
+        }
+      } finally {
+        autoScanInFlightRef.current = false;
+      }
     }
+
+    setMessage(`Launched ${dockApp.name}, but its window is still starting.`);
   }
 
   async function launchDockApp(dockApp: DockApp): Promise<void> {
@@ -356,7 +396,6 @@ function App(): React.JSX.Element {
     autoScanInFlightRef.current = true;
     try {
       const detected = await window.infiniteDesk.scanWindows();
-      setWindows(detected);
 
       const currentWindows = virtualWindowsRef.current;
       const knownHwnds = new Set(currentWindows.flatMap((windowInfo) => (windowInfo.hwnd ? [windowInfo.hwnd] : [])));
@@ -367,6 +406,7 @@ function App(): React.JSX.Element {
         return 0;
       }
 
+      setWindows(detected);
       const placedWindows = placeDetectedWindowsNearSource(newDetectedWindows, currentWindows, sourceHwnd);
       const nextWindows = [...currentWindows, ...placedWindows];
       const nextInitialWindows = [
@@ -411,10 +451,10 @@ function App(): React.JSX.Element {
     if (autoScanTimersRef.current.length > 0) {
       return;
     }
-    autoScanTimersRef.current = [350, 1100, 2400].map((delay) =>
+    autoScanTimersRef.current = INTERACTION_SCAN_DELAYS_MS.map((delay) =>
       window.setTimeout(() => {
         void scanForNewWindows(latestInteractionSourceRef.current);
-        if (delay === 2400) {
+        if (delay === INTERACTION_SCAN_DELAYS_MS[INTERACTION_SCAN_DELAYS_MS.length - 1]) {
           autoScanTimersRef.current = [];
         }
       }, delay)

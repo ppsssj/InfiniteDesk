@@ -433,6 +433,9 @@ ipcMain.handle('dock:launch-app', async (_event, dockApp: DockApp): Promise<Laun
 });
 
 app.whenReady().then(() => {
+  // Start the native preview host while the renderer is loading so the first
+  // real-window preview does not pay the PowerShell/WinForms cold-start cost.
+  sendDwmPreviewCommand({ action: 'hide' });
   createWindow();
 
   const refitWindows = (): void => {
