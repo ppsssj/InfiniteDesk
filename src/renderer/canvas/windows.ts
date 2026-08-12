@@ -116,3 +116,64 @@ export function createInitialVirtualLayout(windows: DetectedWindow[]): VirtualWi
     return placed;
   });
 }
+
+export function refreshVirtualWindowMetadata(
+  currentWindows: VirtualWindowState[],
+  detectedWindows: DetectedWindow[]
+): { windows: VirtualWindowState[]; changedHwnds: string[] } {
+  const detectedByHwnd = new Map(
+    detectedWindows
+      .filter((windowInfo) => windowInfo.hwnd)
+      .map((windowInfo) => [windowInfo.hwnd.toLowerCase(), windowInfo] as const)
+  );
+  const changedHwnds: string[] = [];
+  const windows = currentWindows.map((windowInfo) => {
+    if (!windowInfo.hwnd) {
+      return windowInfo;
+    }
+    const detected = detectedByHwnd.get(windowInfo.hwnd.toLowerCase());
+    if (!detected) {
+      return windowInfo;
+    }
+
+    const hasActivity =
+      detected.title !== windowInfo.title ||
+      detected.processName !== windowInfo.processName ||
+      detected.statusReason !== windowInfo.statusReason;
+    if (hasActivity) {
+      changedHwnds.push(windowInfo.hwnd);
+    }
+    return {
+      ...windowInfo,
+      title: detected.title,
+      processName: detected.processName,
+      statusReason: detected.statusReason
+    };
+  });
+
+  return { windows, changedHwnds };
+}
+
+export function findExistingActivityTarget(
+  detectedWindows: DetectedWindow[],
+  knownHwnds: Iterable<string>,
+  sourceHwnd: string,
+  changedHwnds: string[]
+): string | undefined {
+  if (!sourceHwnd) {
+    return undefined;
+  }
+  const normalizedSource = sourceHwnd.toLowerCase();
+  const normalizedKnown = new Set(Array.from(knownHwnds, (hwnd) => hwnd.toLowerCase()));
+  const foregroundWindow = detectedWindows.find(
+    (windowInfo) =>
+      windowInfo.isForeground &&
+      !windowInfo.isInternal &&
+      !windowInfo.isIgnored &&
+      windowInfo.hwnd.toLowerCase() !== normalizedSource &&
+      normalizedKnown.has(windowInfo.hwnd.toLowerCase())
+  );
+  return (
+    foregroundWindow?.hwnd || changedHwnds.find((hwnd) => hwnd.toLowerCase() !== normalizedSource)
+  );
+}

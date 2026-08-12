@@ -54,6 +54,8 @@ export function CanvasPreview({
   zoomOutSignal,
   actualSizeSignal,
   cameraFocusRequest,
+  activityWindowHwnds,
+  onAcknowledgeWindowActivity,
   onZoomChange
 }: CanvasPreviewProps): React.JSX.Element {
   const canvasRef = useRef<HTMLDivElement | null>(null);
@@ -67,6 +69,10 @@ export function CanvasPreview({
   const [draftRegion, setDraftRegion] = useState<TemplateRegion | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const embeddedWindowIdSet = useMemo(() => new Set(embeddedWindowIds), [embeddedWindowIds]);
+  const activityWindowHwndSet = useMemo(
+    () => new Set(activityWindowHwnds.map((hwnd) => hwnd.toLowerCase())),
+    [activityWindowHwnds]
+  );
   const shouldSuspendNativePreviews = false;
 
   const viewportVersion = useViewportVersion(canvasRef);
@@ -310,6 +316,9 @@ export function CanvasPreview({
     windowInfo: VirtualWindowState,
     key: string
   ): void {
+    if (windowInfo.hwnd) {
+      onAcknowledgeWindowActivity(windowInfo.hwnd);
+    }
     if (event.button !== 0) {
       return;
     }
@@ -573,6 +582,7 @@ export function CanvasPreview({
       return;
     }
 
+    onAcknowledgeWindowActivity(windowInfo.hwnd);
     onWindowCommand(windowInfo.hwnd, command);
   }
 
@@ -581,6 +591,7 @@ export function CanvasPreview({
       return;
     }
 
+    onAcknowledgeWindowActivity(windowInfo.hwnd);
     onWorkWindow(windowInfo.hwnd);
   }
 
@@ -729,13 +740,16 @@ export function CanvasPreview({
             const key = getWindowKey(windowInfo, index);
             const frame = getFrameScreenBounds(windowInfo);
             const isEmbedded = isEmbeddedWindow(windowInfo);
+            const hasActivity = Boolean(
+              windowInfo.hwnd && activityWindowHwndSet.has(windowInfo.hwnd.toLowerCase())
+            );
             const isNativeEmbeddedVisible = shouldShowNativeEmbeddedWindow(windowInfo);
             const isCompactOverview = !isEmbedded && transform.scale < COMPACT_OVERVIEW_SCALE;
             return (
               <article
                 className={`virtual-window ${!isEmbedded ? 'overview-window' : ''} ${isCompactOverview ? 'compact-overview-window' : ''} ${windowInfo.isHelper ? 'helper-window' : ''} ${windowInfo.isDirty ? 'dirty-window' : ''} ${
                   isEmbedded ? 'embedded-window' : ''
-                } ${isEmbedded && !isNativeEmbeddedVisible ? 'embedded-overview-window' : ''}`}
+                } ${isEmbedded && !isNativeEmbeddedVisible ? 'embedded-overview-window' : ''} ${hasActivity ? 'activity-window' : ''}`}
                 key={key}
                 title={isCompactOverview ? `${windowInfo.title} — ${windowInfo.processName}` : undefined}
                 style={{
@@ -801,7 +815,12 @@ export function CanvasPreview({
                   role="application"
                   tabIndex={0}
                   aria-label={`Control ${windowInfo.title}`}
-                  onPointerDown={(event) => handleMirrorPointerDown(event, windowInfo)}
+                  onPointerDown={(event) => {
+                    if (windowInfo.hwnd) {
+                      onAcknowledgeWindowActivity(windowInfo.hwnd);
+                    }
+                    handleMirrorPointerDown(event, windowInfo);
+                  }}
                   onPointerMove={(event) => relayMirrorPointer(event, windowInfo, 'move')}
                   onPointerUp={(event) => handleMirrorPointerUp(event, windowInfo)}
                   onPointerCancel={(event) => handleMirrorPointerCancel(event, windowInfo)}

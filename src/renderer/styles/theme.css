@@ -268,6 +268,38 @@
     0 0 0 3px var(--warning-soft);
 }
 
+.virtual-window.activity-window {
+  border-color: color-mix(in srgb, var(--accent) 86%, white 14%);
+  animation: window-activity-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes window-activity-pulse {
+  0%,
+  100% {
+    box-shadow:
+      var(--shadow),
+      0 0 0 2px color-mix(in srgb, var(--accent) 28%, transparent),
+      0 0 18px color-mix(in srgb, var(--accent) 24%, transparent);
+  }
+
+  50% {
+    box-shadow:
+      var(--shadow),
+      0 0 0 4px color-mix(in srgb, var(--accent) 42%, transparent),
+      0 0 34px color-mix(in srgb, var(--accent) 52%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .virtual-window.activity-window {
+    animation: none;
+    box-shadow:
+      var(--shadow),
+      0 0 0 3px color-mix(in srgb, var(--accent) 36%, transparent),
+      0 0 24px color-mix(in srgb, var(--accent) 34%, transparent);
+  }
+}
+
 .virtual-titlebar {
   min-height: 40px;
   color: var(--text);

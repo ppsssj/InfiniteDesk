@@ -105,6 +105,9 @@ public class WinApi {
   public static extern bool SetForegroundWindow(IntPtr hWnd);
 
   [DllImport("user32.dll")]
+  public static extern IntPtr GetForegroundWindow();
+
+  [DllImport("user32.dll")]
   public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
   [DllImport("user32.dll")]
@@ -248,6 +251,7 @@ function Get-OpenWindows {
     "SnippingTool"
   )
   $virtualScreen = Get-VirtualScreenRect
+  $foregroundWindow = [WinApi]::GetForegroundWindow()
 
   [WinApi]::EnumWindows({
     param([IntPtr]$hWnd, [IntPtr]$lParam)
@@ -331,6 +335,7 @@ function Get-OpenWindows {
       height = if ($hasInvalidMinimizedBounds -or $isOffscreenHidden) { $null } else { $height }
       isMinimized = $isMinimized
       isRestorable = $isRestorable
+      isForeground = $hWnd -eq $foregroundWindow
       isInternal = $isInternal
       isIgnored = $hasNoUsefulPreview -or $isOffscreenHidden
       statusReason = $statusReason

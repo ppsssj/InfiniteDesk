@@ -3,7 +3,13 @@ import { createRoot } from 'react-dom/client';
 import { X } from 'lucide-react';
 import type { DetectedWindow, DockApp, LayoutTemplate, SavedWorkspace } from '../shared/types';
 import { createRegionFromTemplate, getWindowIdentity, getWindowsForRegion, updateRegionMembership } from './canvas/regions';
-import { createInitialVirtualLayout, toVirtualWindow, toVirtualWindows } from './canvas/windows';
+import {
+  createInitialVirtualLayout,
+  findExistingActivityTarget,
+  refreshVirtualWindowMetadata,
+  toVirtualWindow,
+  toVirtualWindows
+} from './canvas/windows';
 import type { TemplateRegion, VirtualWindowState } from './canvas/types';
 import {
   virtualWindowToDetected,
@@ -53,6 +59,7 @@ function App(): React.JSX.Element {
   const [zoomOutSignal, setZoomOutSignal] = useState(0);
   const [actualSizeSignal, setActualSizeSignal] = useState(0);
   const [cameraFocusRequest, setCameraFocusRequest] = useState<{ id: number; hwnd: string } | null>(null);
+  const [activityWindowHwnds, setActivityWindowHwnds] = useState<string[]>([]);
   const [zoomScale, setZoomScale] = useState(1);
   const [launchingAppId, setLaunchingAppId] = useState<string | null>(null);
   const [localDockApps, setLocalDockApps] = useState<DockApp[]>([]);
@@ -68,6 +75,7 @@ function App(): React.JSX.Element {
   const autoScanInFlightRef = useRef(false);
   const autoScanTimersRef = useRef<number[]>([]);
   const latestInteractionSourceRef = useRef('');
+  const interactionScanGenerationRef = useRef(0);
   const cameraFocusRequestIdRef = useRef(0);
   const hasCompletedInitialScanRef = useRef(false);
 
@@ -166,6 +174,7 @@ function App(): React.JSX.Element {
     setSelectedRegionId(null);
     setPreviewTemplate(template);
     setPreviewWorkspace(workspace);
+    setActivityWindowHwnds([]);
     setFitSignal((value) => value + 1);
   }
 
@@ -194,6 +203,19 @@ function App(): React.JSX.Element {
 
     cameraFocusRequestIdRef.current += 1;
     setCameraFocusRequest({ id: cameraFocusRequestIdRef.current, hwnd });
+  }
+
+  function markWindowActivity(hwnds: string[]): void {
+    const normalizedHwnds = hwnds.filter(Boolean).map((hwnd) => hwnd.toLowerCase());
+    if (normalizedHwnds.length === 0) {
+      return;
+    }
+    setActivityWindowHwnds((current) => Array.from(new Set([...current, ...normalizedHwnds])));
+  }
+
+  function acknowledgeWindowActivity(hwnd: string): void {
+    const normalizedHwnd = hwnd.toLowerCase();
+    setActivityWindowHwnds((current) => current.filter((candidate) => candidate !== normalizedHwnd));
   }
 
   async function scanAfterLaunch(dockApp: DockApp): Promise<void> {
@@ -398,19 +420,52 @@ function App(): React.JSX.Element {
       const detected = await window.infiniteDesk.scanWindows();
 
       const currentWindows = virtualWindowsRef.current;
-      const knownHwnds = new Set(currentWindows.flatMap((windowInfo) => (windowInfo.hwnd ? [windowInfo.hwnd] : [])));
-      const newDetectedWindows = toVirtualWindows(detected).filter(
-        (windowInfo) => !windowInfo.isHelper && windowInfo.hwnd && !knownHwnds.has(windowInfo.hwnd)
+      const metadataRefresh = refreshVirtualWindowMetadata(currentWindows, detected);
+      const refreshedWindows = metadataRefresh.windows;
+      const knownHwnds = new Set(
+        currentWindows.flatMap((windowInfo) => (windowInfo.hwnd ? [windowInfo.hwnd.toLowerCase()] : []))
       );
+      const newDetectedWindows = toVirtualWindows(detected).filter(
+        (windowInfo) => !windowInfo.isHelper && windowInfo.hwnd && !knownHwnds.has(windowInfo.hwnd.toLowerCase())
+      );
+      const existingTargetHwnd = findExistingActivityTarget(
+        detected,
+        knownHwnds,
+        sourceHwnd,
+        metadataRefresh.changedHwnds
+      );
+      const changedActivityHwnds = sourceHwnd
+        ? metadataRefresh.changedHwnds.filter((hwnd) => hwnd.toLowerCase() !== sourceHwnd.toLowerCase())
+        : metadataRefresh.changedHwnds;
+      const activityHwnds = [
+        ...changedActivityHwnds,
+        ...(existingTargetHwnd ? [existingTargetHwnd] : [])
+      ];
+      markWindowActivity(activityHwnds);
+
+      if (metadataRefresh.changedHwnds.length > 0) {
+        const refreshedInitial = refreshVirtualWindowMetadata(initialVirtualWindowsRef.current, detected).windows;
+        virtualWindowsRef.current = refreshedWindows;
+        initialVirtualWindowsRef.current = refreshedInitial;
+        setVirtualWindows(refreshedWindows);
+        setInitialVirtualWindows(refreshedInitial);
+        setWindows(detected);
+      }
       if (newDetectedWindows.length === 0) {
+        if (sourceHwnd && existingTargetHwnd) {
+          focusCameraOnWindow(existingTargetHwnd);
+          const target = detected.find((windowInfo) => windowInfo.hwnd.toLowerCase() === existingTargetHwnd.toLowerCase());
+          setMessage(`${target?.processName || 'An existing window'} received new activity.`);
+          return 1;
+        }
         return 0;
       }
 
       setWindows(detected);
-      const placedWindows = placeDetectedWindowsNearSource(newDetectedWindows, currentWindows, sourceHwnd);
-      const nextWindows = [...currentWindows, ...placedWindows];
+      const placedWindows = placeDetectedWindowsNearSource(newDetectedWindows, refreshedWindows, sourceHwnd);
+      const nextWindows = [...refreshedWindows, ...placedWindows];
       const nextInitialWindows = [
-        ...initialVirtualWindowsRef.current,
+        ...refreshVirtualWindowMetadata(initialVirtualWindowsRef.current, detected).windows,
         ...placedWindows.map((windowInfo) => ({ ...windowInfo, isDirty: false }))
       ];
       const nextRegions = updateRegionMembership(nextWindows, regionsRef.current);
@@ -433,6 +488,7 @@ function App(): React.JSX.Element {
       const focusTarget =
         placedWindows.find((windowInfo) => windowInfo.hwnd?.toLowerCase() === preferredHwnd?.toLowerCase()) ||
         placedWindows[placedWindows.length - 1];
+      markWindowActivity(placedWindows.flatMap((windowInfo) => (windowInfo.hwnd ? [windowInfo.hwnd] : [])));
       focusCameraOnWindow(focusTarget?.hwnd);
       setMessage(
         `${placedWindows.length} new window${placedWindows.length === 1 ? '' : 's'} opened and added to InfiniteDesk.`
@@ -451,12 +507,22 @@ function App(): React.JSX.Element {
     if (autoScanTimersRef.current.length > 0) {
       return;
     }
+    interactionScanGenerationRef.current += 1;
+    const generation = interactionScanGenerationRef.current;
     autoScanTimersRef.current = INTERACTION_SCAN_DELAYS_MS.map((delay) =>
       window.setTimeout(() => {
-        void scanForNewWindows(latestInteractionSourceRef.current);
-        if (delay === INTERACTION_SCAN_DELAYS_MS[INTERACTION_SCAN_DELAYS_MS.length - 1]) {
-          autoScanTimersRef.current = [];
-        }
+        void scanForNewWindows(latestInteractionSourceRef.current).then((handledCount) => {
+          if (generation !== interactionScanGenerationRef.current) {
+            return;
+          }
+          if (handledCount > 0) {
+            autoScanTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
+            autoScanTimersRef.current = [];
+            interactionScanGenerationRef.current += 1;
+          } else if (delay === INTERACTION_SCAN_DELAYS_MS[INTERACTION_SCAN_DELAYS_MS.length - 1]) {
+            autoScanTimersRef.current = [];
+          }
+        });
       }, delay)
     );
   }
@@ -481,6 +547,7 @@ function App(): React.JSX.Element {
     setInitialVirtualWindows(nextInitialWindows);
     setRegions(nextRegions);
     setEmbeddedWindowIds((current) => current.filter((item) => item.toLowerCase() !== normalizedHwnd));
+    setActivityWindowHwnds((current) => current.filter((item) => item !== normalizedHwnd));
     setPreviewTemplate(null);
     setPreviewWorkspace(null);
     setMessage('A closed application window was removed from InfiniteDesk.');
@@ -610,6 +677,7 @@ function App(): React.JSX.Element {
 
   useEffect(() => {
     const unsubscribeInteraction = window.infiniteDesk.onWindowInteractionComplete((sourceHwnd) => {
+      acknowledgeWindowActivity(sourceHwnd);
       if (previewTemplate || previewWorkspace) {
         return;
       }
@@ -742,6 +810,8 @@ function App(): React.JSX.Element {
           zoomOutSignal={zoomOutSignal}
           actualSizeSignal={actualSizeSignal}
           cameraFocusRequest={cameraFocusRequest}
+          activityWindowHwnds={activityWindowHwnds}
+          onAcknowledgeWindowActivity={acknowledgeWindowActivity}
           onZoomChange={setZoomScale}
         />
 

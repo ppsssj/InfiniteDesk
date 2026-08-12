@@ -13,6 +13,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Windows.Automation;
 using System.Windows.Forms;
@@ -105,18 +106,9 @@ namespace InfiniteDeskPreview {
     private const int SM_CXDOUBLECLK = 36;
     private const int SM_CYDOUBLECLK = 37;
     private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
-    private static readonly HashSet<string> AccessibleWheelProcesses = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
-      "chrome",
-      "msedge",
-      "brave",
-      "vivaldi",
-      "opera",
-      "electron",
-      "figma"
-    };
-
     private static readonly Dictionary<long, IntPtr> capturedTargets = new Dictionary<long, IntPtr>();
     private static readonly Dictionary<long, int> capturedButtons = new Dictionary<long, int>();
+    private static readonly HashSet<long> automationClickSources = new HashSet<long>();
     private sealed class ClickState {
       public IntPtr target;
       public string button;
@@ -124,11 +116,24 @@ namespace InfiniteDeskPreview {
       public long timestamp;
     }
     private static readonly Dictionary<long, ClickState> lastClicks = new Dictionary<long, ClickState>();
+    private sealed class AutomationClickState {
+      public string elementKey;
+      public Point screenPoint;
+      public long timestamp;
+    }
+    private static readonly Dictionary<long, AutomationClickState> lastAutomationClicks = new Dictionary<long, AutomationClickState>();
     private sealed class CodeEditorTarget {
       public AutomationElement input;
       public System.Windows.Rect bounds;
     }
     private static readonly Dictionary<long, List<CodeEditorTarget>> codeEditorTargets = new Dictionary<long, List<CodeEditorTarget>>();
+    private sealed class AutomationTargetCache {
+      public List<AutomationElement> elements;
+      public DateTime expiresAtUtc;
+    }
+    private static readonly Dictionary<long, AutomationTargetCache> scrollAutomationTargets = new Dictionary<long, AutomationTargetCache>();
+    private static readonly Dictionary<long, AutomationTargetCache> clickAutomationTargets = new Dictionary<long, AutomationTargetCache>();
+    private static readonly Dictionary<long, AutomationTargetCache> focusAutomationTargets = new Dictionary<long, AutomationTargetCache>();
     private static readonly object codeScrollSync = new object();
     private static System.Threading.Timer codeFocusRestoreTimer;
     private static DateTime codeFocusRestoreAtUtc;
@@ -190,6 +195,9 @@ namespace InfiniteDeskPreview {
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int index);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr hWnd, StringBuilder className, int maxCount);
+
     [DllImport("user32.dll")]
     private static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
 
@@ -249,6 +257,10 @@ namespace InfiniteDeskPreview {
         int buttonMask = ButtonMask(input.button);
         capturedTargets[sourceKey] = target;
         capturedButtons[sourceKey] = buttonMask;
+        if (TryRelayAutomationClick(source, screenPoint, input.button, input.clickCount)) {
+          automationClickSources.Add(sourceKey);
+          return;
+        }
         int clickCount = ResolveClickCount(sourceKey, target, input.button, screenPoint, input.clickCount);
         uint message = clickCount >= 2 ? DoubleClickMessage(input.button) : DownMessage(input.button);
         PostMessage(target, message, new IntPtr(buttonMask), pointParam);
@@ -273,6 +285,11 @@ namespace InfiniteDeskPreview {
       }
 
       if (phase == "up" || phase == "cancel") {
+        if (automationClickSources.Remove(sourceKey)) {
+          capturedTargets.Remove(sourceKey);
+          capturedButtons.Remove(sourceKey);
+          return;
+        }
         int pressedMask = GetCapturedButtons(sourceKey);
         if (phase == "cancel" && pressedMask != 0) {
           if ((pressedMask & MK_LBUTTON) != 0) PostMessage(target, WM_LBUTTONUP, IntPtr.Zero, pointParam);
@@ -295,6 +312,26 @@ namespace InfiniteDeskPreview {
 
     public static bool IsValidWindow(IntPtr handle) {
       return handle != IntPtr.Zero && IsWindow(handle);
+    }
+
+    public static void ForgetSource(IntPtr source) {
+      if (source == IntPtr.Zero) {
+        return;
+      }
+      long sourceKey = source.ToInt64();
+      capturedTargets.Remove(sourceKey);
+      capturedButtons.Remove(sourceKey);
+      automationClickSources.Remove(sourceKey);
+      lastClicks.Remove(sourceKey);
+      lastAutomationClicks.Remove(sourceKey);
+      codeEditorTargets.Remove(sourceKey);
+      scrollAutomationTargets.Remove(sourceKey);
+      clickAutomationTargets.Remove(sourceKey);
+      focusAutomationTargets.Remove(sourceKey);
+      if (activeCodeSource == sourceKey) {
+        activeCodeSource = 0;
+        activeCodeInput = null;
+      }
     }
 
     private static void FocusSource(IntPtr source) {
@@ -332,70 +369,304 @@ namespace InfiniteDeskPreview {
         return true;
       }
 
+      // UIA describes the actual scroll surface for Chromium, WinUI, WPF and
+      // other windowless controls where WM_MOUSEWHEEL cannot reach the view.
+      // Try the element under the pointer for every app instead of maintaining
+      // a fragile process-name allow-list.
+      if (TryScrollAutomation(source, screenPoint, wheelDelta)) {
+        return true;
+      }
+
       string processName = GetProcessName(source);
       if (String.Equals(processName, "code", StringComparison.OrdinalIgnoreCase)) {
-        // VS Code extension surfaces such as Codex are scrollable webviews, not
-        // Monaco editor instances. Prefer the scrollable UIA element directly
-        // under the pointer, then keep the editor-specific keyboard fallback.
-        if (TryScrollAutomation(source, screenPoint, wheelDelta, true)) {
+        // Monaco can omit ScrollPattern, so keep the editor keyboard fallback.
+        if (TryScrollCodeEditor(source, controller, screenPoint, wheelDelta)) {
           return true;
         }
-        return TryScrollCodeEditor(source, controller, screenPoint, wheelDelta);
       }
-      return AccessibleWheelProcesses.Contains(processName) && TryScrollAutomation(source, screenPoint, wheelDelta, false);
+      return IsChromiumWindow(source) && TryScrollChromiumContent(source, controller, screenPoint, wheelDelta);
     }
 
-    private static bool TryScrollAutomation(IntPtr source, Point screenPoint, int wheelDelta, bool requirePointMatch) {
-      try {
-        AutomationElement root = AutomationElement.FromHandle(source);
-        Condition condition = new PropertyCondition(AutomationElement.IsScrollPatternAvailableProperty, true);
-        AutomationElementCollection candidates = root.FindAll(TreeScope.Descendants, condition);
-        AutomationElement selected = null;
-        AutomationElement fallback = null;
-        double selectedArea = Double.MaxValue;
+    private static bool TryScrollAutomation(IntPtr source, Point screenPoint, int wheelDelta) {
+      long sourceKey = source.ToInt64();
+      for (int attempt = 0; attempt < 2; attempt++) {
+        try {
+          List<AutomationElement> candidates = GetAutomationTargets(
+            source,
+            scrollAutomationTargets,
+            new PropertyCondition(AutomationElement.IsScrollPatternAvailableProperty, true),
+            attempt > 0
+          );
+          AutomationElement selected = null;
+          double selectedArea = Double.MaxValue;
 
-        for (int index = 0; index < candidates.Count; index++) {
-          AutomationElement candidate = candidates[index];
-          ScrollPattern pattern;
-          try {
-            pattern = (ScrollPattern)candidate.GetCurrentPattern(ScrollPattern.Pattern);
-          } catch {
-            continue;
+          foreach (AutomationElement candidate in candidates) {
+            ScrollPattern pattern;
+            try {
+              pattern = (ScrollPattern)candidate.GetCurrentPattern(ScrollPattern.Pattern);
+            } catch {
+              continue;
+            }
+            if (!pattern.Current.VerticallyScrollable) {
+              continue;
+            }
+
+            System.Windows.Rect bounds = candidate.Current.BoundingRectangle;
+            bool containsPoint = ContainsPoint(bounds, screenPoint);
+            double area = bounds.IsEmpty ? Double.MaxValue : bounds.Width * bounds.Height;
+            if (containsPoint && area < selectedArea) {
+              selected = candidate;
+              selectedArea = area;
+            }
           }
-          if (!pattern.Current.VerticallyScrollable) {
-            continue;
-          }
-          if (fallback == null) {
-            fallback = candidate;
+          if (selected == null) {
+            if (attempt == 0) {
+              scrollAutomationTargets.Remove(sourceKey);
+              continue;
+            }
+            return false;
           }
 
-          System.Windows.Rect bounds = candidate.Current.BoundingRectangle;
-          bool containsPoint = !bounds.IsEmpty &&
-            screenPoint.x >= bounds.Left && screenPoint.x < bounds.Right &&
-            screenPoint.y >= bounds.Top && screenPoint.y < bounds.Bottom;
-          double area = bounds.IsEmpty ? Double.MaxValue : bounds.Width * bounds.Height;
-          if (containsPoint && area < selectedArea) {
-            selected = candidate;
-            selectedArea = area;
+          ScrollPattern selectedPattern = (ScrollPattern)selected.GetCurrentPattern(ScrollPattern.Pattern);
+          ScrollAmount amount = wheelDelta < 0 ? ScrollAmount.SmallIncrement : ScrollAmount.SmallDecrement;
+          int steps = Math.Max(1, Math.Abs(wheelDelta) / 120) * 3;
+          for (int step = 0; step < steps; step++) {
+            selectedPattern.Scroll(ScrollAmount.NoAmount, amount);
           }
+          return true;
+        } catch {
+          scrollAutomationTargets.Remove(sourceKey);
         }
-        if (selected == null && !requirePointMatch) {
-          selected = fallback;
-        }
-        if (selected == null) {
-          return false;
-        }
+      }
+      return false;
+    }
 
-        ScrollPattern selectedPattern = (ScrollPattern)selected.GetCurrentPattern(ScrollPattern.Pattern);
-        ScrollAmount amount = wheelDelta < 0 ? ScrollAmount.SmallIncrement : ScrollAmount.SmallDecrement;
-        int steps = Math.Max(1, Math.Abs(wheelDelta) / 120) * 3;
-        for (int step = 0; step < steps; step++) {
-          selectedPattern.Scroll(ScrollAmount.NoAmount, amount);
-        }
-        return true;
-      } catch {
+    private static bool TryRelayAutomationClick(IntPtr source, Point screenPoint, string button, int reportedClickCount) {
+      if (!String.Equals(button, "left", StringComparison.OrdinalIgnoreCase) || !IsExplorerWindow(source)) {
         return false;
       }
+
+      long sourceKey = source.ToInt64();
+      for (int attempt = 0; attempt < 2; attempt++) {
+        try {
+          Condition clickableCondition = new OrCondition(
+            new PropertyCondition(AutomationElement.IsSelectionItemPatternAvailableProperty, true),
+            new PropertyCondition(AutomationElement.IsInvokePatternAvailableProperty, true)
+          );
+          List<AutomationElement> candidates = GetAutomationTargets(
+            source,
+            clickAutomationTargets,
+            clickableCondition,
+            attempt > 0
+          );
+          AutomationElement selected = null;
+          double selectedArea = Double.MaxValue;
+          foreach (AutomationElement candidate in candidates) {
+            ControlType controlType = candidate.Current.ControlType;
+            if (controlType != ControlType.ListItem && controlType != ControlType.DataItem && controlType != ControlType.TreeItem) {
+              continue;
+            }
+            System.Windows.Rect bounds = candidate.Current.BoundingRectangle;
+            double area = bounds.IsEmpty ? Double.MaxValue : bounds.Width * bounds.Height;
+            if (ContainsPoint(bounds, screenPoint) && area < selectedArea) {
+              selected = candidate;
+              selectedArea = area;
+            }
+          }
+          if (selected == null) {
+            if (attempt == 0) {
+              clickAutomationTargets.Remove(sourceKey);
+              continue;
+            }
+            return false;
+          }
+
+          int clickCount = ResolveAutomationClickCount(sourceKey, selected, screenPoint, reportedClickCount);
+          selected.SetFocus();
+          object selectionPattern;
+          if (selected.TryGetCurrentPattern(SelectionItemPattern.Pattern, out selectionPattern)) {
+            ((SelectionItemPattern)selectionPattern).Select();
+          }
+          object invokePattern;
+          if (clickCount >= 2 && selected.TryGetCurrentPattern(InvokePattern.Pattern, out invokePattern)) {
+            ((InvokePattern)invokePattern).Invoke();
+          }
+          return true;
+        } catch {
+          clickAutomationTargets.Remove(sourceKey);
+        }
+      }
+      return false;
+    }
+
+    private static int ResolveAutomationClickCount(
+      long sourceKey,
+      AutomationElement element,
+      Point screenPoint,
+      int reportedClickCount
+    ) {
+      string elementKey = GetAutomationElementKey(element);
+      long now = Stopwatch.GetTimestamp();
+      AutomationClickState previous;
+      bool isDoubleClick = reportedClickCount >= 2;
+
+      if (!isDoubleClick && lastAutomationClicks.TryGetValue(sourceKey, out previous)) {
+        long maximumTicks = Math.Max(1L, (long)Math.Ceiling(GetDoubleClickTime() * Stopwatch.Frequency / 1000.0));
+        int maximumXDistance = Math.Max(1, GetSystemMetrics(SM_CXDOUBLECLK) / 2);
+        int maximumYDistance = Math.Max(1, GetSystemMetrics(SM_CYDOUBLECLK) / 2);
+        isDoubleClick = String.Equals(previous.elementKey, elementKey, StringComparison.Ordinal) &&
+          now - previous.timestamp >= 0 && now - previous.timestamp <= maximumTicks &&
+          Math.Abs(screenPoint.x - previous.screenPoint.x) <= maximumXDistance &&
+          Math.Abs(screenPoint.y - previous.screenPoint.y) <= maximumYDistance;
+      }
+
+      if (isDoubleClick) {
+        lastAutomationClicks.Remove(sourceKey);
+        return 2;
+      }
+
+      lastAutomationClicks[sourceKey] = new AutomationClickState {
+        elementKey = elementKey,
+        screenPoint = screenPoint,
+        timestamp = now
+      };
+      return 1;
+    }
+
+    private static string GetAutomationElementKey(AutomationElement element) {
+      try {
+        int[] runtimeId = element.GetRuntimeId();
+        if (runtimeId != null && runtimeId.Length > 0) {
+          return String.Join(".", Array.ConvertAll(runtimeId, delegate(int value) { return value.ToString(); }));
+        }
+      } catch {
+        // Fall back to stable visible properties when a provider omits RuntimeId.
+      }
+      System.Windows.Rect bounds = element.Current.BoundingRectangle;
+      return element.Current.ControlType.Id + "|" + element.Current.ClassName + "|" +
+        element.Current.AutomationId + "|" + element.Current.Name + "|" +
+        bounds.Left + "," + bounds.Top + "," + bounds.Width + "," + bounds.Height;
+    }
+
+    private static bool TryScrollChromiumContent(IntPtr source, IntPtr controller, Point screenPoint, int wheelDelta) {
+      long sourceKey = source.ToInt64();
+      for (int attempt = 0; attempt < 2; attempt++) {
+        try {
+          List<AutomationElement> candidates = GetAutomationTargets(
+            source,
+            focusAutomationTargets,
+            new PropertyCondition(AutomationElement.IsKeyboardFocusableProperty, true),
+            attempt > 0
+          );
+          AutomationElement selected = null;
+          AutomationElement documentTarget = null;
+          AutomationElement editFallback = null;
+          double selectedArea = Double.MaxValue;
+          double documentArea = Double.MaxValue;
+          double editFallbackArea = Double.MaxValue;
+          foreach (AutomationElement candidate in candidates) {
+            System.Windows.Rect bounds = candidate.Current.BoundingRectangle;
+            if (!ContainsPoint(bounds, screenPoint)) {
+              continue;
+            }
+            double area = bounds.Width * bounds.Height;
+            if (candidate.Current.ControlType == ControlType.Document) {
+              if (area < documentArea) {
+                documentTarget = candidate;
+                documentArea = area;
+              }
+              continue;
+            }
+            if (candidate.Current.ControlType == ControlType.Edit) {
+              if (area < editFallbackArea) {
+                editFallback = candidate;
+                editFallbackArea = area;
+              }
+              continue;
+            }
+            if (area < selectedArea) {
+              selected = candidate;
+              selectedArea = area;
+            }
+          }
+          if (documentTarget != null) {
+            selected = documentTarget;
+          } else if (selected == null) {
+            selected = editFallback;
+          }
+          if (selected == null) {
+            if (attempt == 0) {
+              focusAutomationTargets.Remove(sourceKey);
+              continue;
+            }
+            return false;
+          }
+
+          FocusSource(source);
+          selected.SetFocus();
+          Thread.Sleep(8);
+          byte direction = wheelDelta < 0 ? VK_DOWN : VK_UP;
+          int steps = Math.Max(1, Math.Abs(wheelDelta) / 120) * 3;
+          for (int step = 0; step < steps; step++) {
+            keybd_event(direction, 0, 0, UIntPtr.Zero);
+            keybd_event(direction, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+          }
+          ScheduleCodeFocusRestore(controller);
+          return true;
+        } catch {
+          focusAutomationTargets.Remove(sourceKey);
+        }
+      }
+      return false;
+    }
+
+    private static List<AutomationElement> GetAutomationTargets(
+      IntPtr source,
+      Dictionary<long, AutomationTargetCache> cache,
+      Condition condition,
+      bool refresh
+    ) {
+      long sourceKey = source.ToInt64();
+      AutomationTargetCache cached;
+      if (!refresh && cache.TryGetValue(sourceKey, out cached) && cached.expiresAtUtc > DateTime.UtcNow) {
+        return cached.elements;
+      }
+
+      AutomationElement root = AutomationElement.FromHandle(source);
+      AutomationElementCollection found = root.FindAll(TreeScope.Descendants, condition);
+      List<AutomationElement> elements = new List<AutomationElement>();
+      for (int index = 0; index < found.Count; index++) {
+        elements.Add(found[index]);
+      }
+      cache[sourceKey] = new AutomationTargetCache {
+        elements = elements,
+        expiresAtUtc = DateTime.UtcNow.AddSeconds(2)
+      };
+      return elements;
+    }
+
+    private static bool ContainsPoint(System.Windows.Rect bounds, Point point) {
+      return !bounds.IsEmpty &&
+        point.x >= bounds.Left && point.x < bounds.Right &&
+        point.y >= bounds.Top && point.y < bounds.Bottom;
+    }
+
+    private static bool IsExplorerWindow(IntPtr source) {
+      string className = GetWindowClassName(source);
+      return String.Equals(className, "CabinetWClass", StringComparison.Ordinal) ||
+        String.Equals(className, "ExploreWClass", StringComparison.Ordinal);
+    }
+
+    private static bool IsChromiumWindow(IntPtr source) {
+      return String.Equals(GetWindowClassName(source), "Chrome_WidgetWin_1", StringComparison.Ordinal);
+    }
+
+    private static string GetWindowClassName(IntPtr source) {
+      StringBuilder className = new StringBuilder(128);
+      if (GetClassName(source, className, className.Capacity) <= 0) {
+        return String.Empty;
+      }
+      return className.ToString();
     }
 
     private static bool TryScrollCodeEditor(IntPtr source, IntPtr controller, Point screenPoint, int wheelDelta) {
@@ -601,11 +872,18 @@ namespace InfiniteDeskPreview {
     }
 
     private static IntPtr ParseHwnd(string value) {
-      string trimmed = value.Trim();
-      if (trimmed.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) {
-        return new IntPtr(Convert.ToInt64(trimmed.Substring(2), 16));
+      if (String.IsNullOrWhiteSpace(value)) {
+        return IntPtr.Zero;
       }
-      return new IntPtr(Convert.ToInt64(trimmed));
+      string trimmed = value.Trim();
+      try {
+        if (trimmed.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) {
+          return new IntPtr(Convert.ToInt64(trimmed.Substring(2), 16));
+        }
+        return new IntPtr(Convert.ToInt64(trimmed));
+      } catch {
+        return IntPtr.Zero;
+      }
     }
   }
 
@@ -1149,6 +1427,9 @@ namespace InfiniteDeskPreview {
     }
 
     public void HandleCommand(PreviewCommand command) {
+      if (command == null) {
+        return;
+      }
       string action = command.action == null ? "" : command.action.ToLowerInvariant();
       if (action == "exit") {
         windowWatchTimer.Stop();
@@ -1244,6 +1525,7 @@ namespace InfiniteDeskPreview {
           Console.Out.WriteLine("{\"event\":\"window-closed\",\"hwnd\":\"0x" + sourceValue.ToString("X") + "\"}");
           Console.Out.Flush();
         }
+        NativePointerRelay.ForgetSource(source);
         form.RemoveClosedSource();
       }
     }
@@ -1266,10 +1548,14 @@ namespace InfiniteDeskPreview {
         return IntPtr.Zero;
       }
       string trimmed = value.Trim();
-      if (trimmed.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) {
-        return new IntPtr(Convert.ToInt64(trimmed.Substring(2), 16));
+      try {
+        if (trimmed.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) {
+          return new IntPtr(Convert.ToInt64(trimmed.Substring(2), 16));
+        }
+        return new IntPtr(Convert.ToInt64(trimmed));
+      } catch {
+        return IntPtr.Zero;
       }
-      return new IntPtr(Convert.ToInt64(trimmed));
     }
   }
 

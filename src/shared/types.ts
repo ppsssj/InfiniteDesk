@@ -8,6 +8,7 @@ export type DetectedWindow = {
   height: number | null;
   isMinimized: boolean;
   isRestorable: boolean;
+  isForeground?: boolean;
   isInternal?: boolean;
   isIgnored?: boolean;
   statusReason?: string;

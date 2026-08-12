@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { createInitialVirtualLayout, getVirtualWindowBounds, hasUsableWindowBounds, toVirtualWindow, toVirtualWindows } from './windows';
+import {
+  createInitialVirtualLayout,
+  findExistingActivityTarget,
+  getVirtualWindowBounds,
+  hasUsableWindowBounds,
+  refreshVirtualWindowMetadata,
+  toVirtualWindow,
+  toVirtualWindows
+} from './windows';
 import type { DetectedWindow } from '../../shared/types';
 import type { VirtualWindowState } from './types';
 
@@ -80,6 +88,43 @@ describe('getVirtualWindowBounds', () => {
     ];
 
     expect(getVirtualWindowBounds(windows)).toEqual({ x: 0, y: 0, width: 250, height: 200 });
+  });
+});
+
+describe('refreshVirtualWindowMetadata', () => {
+  it('updates titles without changing virtual placement and reports activity', () => {
+    const current = toVirtualWindows([makeDetected({ hwnd: '0xA', title: 'Old title' })]);
+    current[0].virtualX = 900;
+    current[0].virtualY = 700;
+
+    const result = refreshVirtualWindowMetadata(current, [makeDetected({ hwnd: '0xa', title: 'New title' })]);
+
+    expect(result.changedHwnds).toEqual(['0xA']);
+    expect(result.windows[0]).toMatchObject({ title: 'New title', virtualX: 900, virtualY: 700 });
+  });
+
+  it('does not report unchanged known windows as activity', () => {
+    const current = toVirtualWindows([makeDetected({ hwnd: '0xA', title: 'Same title' })]);
+    const result = refreshVirtualWindowMetadata(current, [makeDetected({ hwnd: '0xa', title: 'Same title' })]);
+
+    expect(result.changedHwnds).toEqual([]);
+  });
+});
+
+describe('findExistingActivityTarget', () => {
+  it('selects an existing foreground window activated by the source interaction', () => {
+    const detected = [
+      makeDetected({ hwnd: '0x1', processName: 'explorer' }),
+      makeDetected({ hwnd: '0x2', processName: 'msedge', isForeground: true })
+    ];
+
+    expect(findExistingActivityTarget(detected, ['0x1', '0x2'], '0x1', [])).toBe('0x2');
+  });
+
+  it('falls back to a known window whose title changed', () => {
+    const detected = [makeDetected({ hwnd: '0x2', processName: 'msedge', title: 'Opened PDF' })];
+
+    expect(findExistingActivityTarget(detected, ['0x1', '0x2'], '0x1', ['0x2'])).toBe('0x2');
   });
 });
 
