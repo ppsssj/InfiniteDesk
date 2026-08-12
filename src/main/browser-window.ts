@@ -1,6 +1,7 @@
 import { app, BrowserWindow, screen, type Rectangle } from 'electron';
 import { join } from 'node:path';
 import { resyncDwmPreviewsFor, clearDwmPreviewsFor, sendDwmPreviewCommand } from './dwm-preview-client';
+import { hardenWebContents } from './security';
 
 const isDev = !app.isPackaged;
 
@@ -43,6 +44,9 @@ export function fitBrowserWindowToDisplay(window: BrowserWindow): void {
 export function createWindow(): void {
   const windowBounds = getResponsiveWindowBounds();
   const minimumSize = getResponsiveMinimumSize(windowBounds);
+  const iconPath = app.isPackaged
+    ? join(process.resourcesPath, 'icons', 'icon.ico')
+    : join(process.cwd(), 'resources', 'icons', 'icon.ico');
   const mainWindow = new BrowserWindow({
     x: windowBounds.x,
     y: windowBounds.y,
@@ -51,16 +55,19 @@ export function createWindow(): void {
     minWidth: minimumSize.minWidth,
     minHeight: minimumSize.minHeight,
     title: 'InfiniteDesk',
-    icon: join(app.getAppPath(), 'resources/icons/icon.ico'),
+    icon: iconPath,
     backgroundColor: '#00000000',
     transparent: true,
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      sandbox: true
     }
   });
+
+  hardenWebContents(mainWindow.webContents);
 
   mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
     console.error(`[renderer:did-fail-load] ${errorCode} ${errorDescription} ${validatedURL}`);

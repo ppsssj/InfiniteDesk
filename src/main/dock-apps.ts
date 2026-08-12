@@ -1,6 +1,7 @@
 import { app, shell } from 'electron';
 import { join, basename, extname, isAbsolute, parse } from 'node:path';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import type { DockApp, LaunchResult } from '../shared/types';
@@ -9,13 +10,51 @@ const APP_SCAN_MAX_DEPTH = 6;
 const APP_SCAN_EXTENSIONS = new Set(['.lnk', '.url', '.exe']);
 const ICON_WORKER_COUNT = 8;
 
+const DEFAULT_DOCK_APPS: DockApp[] = [
+  {
+    id: 'vscode',
+    name: 'VS Code',
+    executablePath: 'code',
+    processName: 'Code',
+    icon: 'VS',
+    isPinned: true
+  },
+  {
+    id: 'chrome',
+    name: 'Chrome',
+    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    processName: 'chrome',
+    icon: 'CH',
+    isPinned: true
+  },
+  {
+    id: 'terminal',
+    name: 'Terminal',
+    executablePath: 'wt',
+    processName: 'WindowsTerminal',
+    icon: 'WT',
+    isPinned: true
+  },
+  {
+    id: 'explorer',
+    name: 'Explorer',
+    executablePath: 'explorer.exe',
+    processName: 'explorer',
+    icon: 'EX',
+    isPinned: true
+  }
+];
+
+const launchableDockApps = new Map(DEFAULT_DOCK_APPS.map((dockApp) => [dockApp.id, dockApp]));
+
 type DiscoveredDockApp = DockApp & {
   iconSourcePaths: string[];
   identityKey: string;
 };
 
 function getDockAppId(path: string): string {
-  return `local-${Buffer.from(path.toLowerCase()).toString('base64url').slice(0, 42)}`;
+  const digest = createHash('sha256').update(path.toLowerCase()).digest('base64url').slice(0, 24);
+  return `local-${digest}`;
 }
 
 function getAppSearchRoots(): string[] {
@@ -225,10 +264,19 @@ export async function listLocalDockApps(): Promise<DockApp[]> {
   });
   await Promise.all(workers);
 
+  for (const dockApp of appsWithIcons) {
+    launchableDockApps.set(dockApp.id, dockApp);
+  }
+
   return appsWithIcons;
 }
 
-export async function launchDockApp(dockApp: DockApp): Promise<LaunchResult> {
+export async function launchDockApp(appId: string): Promise<LaunchResult> {
+  const dockApp = launchableDockApps.get(appId);
+  if (!dockApp) {
+    return { success: false, error: 'The requested app is not in the trusted Dock app list.' };
+  }
+
   if (!dockApp.executablePath || dockApp.executablePath.trim().length === 0) {
     return { success: false, error: 'No executable path was provided.' };
   }
@@ -237,6 +285,9 @@ export async function launchDockApp(dockApp: DockApp): Promise<LaunchResult> {
     const executablePath = dockApp.executablePath.trim();
     const extension = extname(executablePath).toLowerCase();
     if (/^[a-z][a-z0-9+.-]*:/i.test(executablePath) && !isAbsolute(executablePath)) {
+      if (!executablePath.toLowerCase().startsWith('ms-settings:')) {
+        return { success: false, error: 'Unsupported app URI scheme.' };
+      }
       await shell.openExternal(executablePath);
       return { success: true };
     }

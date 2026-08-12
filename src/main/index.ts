@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, screen, type IpcMainInvokeEvent, type Rectangle } from 'electron';
+import { app, BrowserWindow, screen, type IpcMainInvokeEvent, type Rectangle } from 'electron';
 import type {
   ApplyLayoutInput,
   CreateTemplateInput,
@@ -37,11 +37,14 @@ import {
 } from './embedded-windows';
 import { createWindow, fitBrowserWindowToDisplay } from './browser-window';
 import { nativeWindowHandleToString } from './win32';
+import { handleTrusted } from './security';
 
 let overlayRestoreBounds: Rectangle | null = null;
 let isQuittingAfterDetach = false;
 
 app.disableHardwareAcceleration();
+app.enableSandbox();
+app.setAppUserModelId('com.infinitedesk.app');
 
 function isBlankHwnd(hwnd: string | null | undefined): boolean {
   return !hwnd || hwnd.trim().length === 0;
@@ -67,16 +70,16 @@ function getControllerWindow(event: IpcMainInvokeEvent): BrowserWindow | null {
   return controllerWindow;
 }
 
-ipcMain.handle('windows:scan', async (): Promise<DetectedWindow[]> => {
+handleTrusted('windows:scan', async (): Promise<DetectedWindow[]> => {
   const result = await sendWindowControlCommand<DetectedWindow[] | DetectedWindow>('scan', {});
   return Array.isArray(result) ? result : [result];
 });
 
-ipcMain.handle('templates:list', async (): Promise<LayoutTemplate[]> => {
+handleTrusted('templates:list', async (): Promise<LayoutTemplate[]> => {
   return readTemplates();
 });
 
-ipcMain.handle('templates:create', async (_event, input: CreateTemplateInput): Promise<LayoutTemplate> => {
+handleTrusted('templates:create', async (_event, input: CreateTemplateInput): Promise<LayoutTemplate> => {
   const restorableWindows = input.windows.filter(isRestorableWindow);
 
   if (restorableWindows.length === 0) {
@@ -98,16 +101,16 @@ ipcMain.handle('templates:create', async (_event, input: CreateTemplateInput): P
   return template;
 });
 
-ipcMain.handle('templates:delete', async (_event, id: string): Promise<void> => {
+handleTrusted('templates:delete', async (_event, id: string): Promise<void> => {
   const templates = await readTemplates();
   await writeTemplates(templates.filter((template) => template.id !== id));
 });
 
-ipcMain.handle('workspaces:list', async (): Promise<SavedWorkspace[]> => {
+handleTrusted('workspaces:list', async (): Promise<SavedWorkspace[]> => {
   return readWorkspaces();
 });
 
-ipcMain.handle('workspaces:create', async (_event, input: CreateWorkspaceInput): Promise<SavedWorkspace> => {
+handleTrusted('workspaces:create', async (_event, input: CreateWorkspaceInput): Promise<SavedWorkspace> => {
   const workspaceWindows = input.windows.filter(isRestorableWindow);
 
   const workspaceRegions: WorkspaceRegion[] = input.regions.map((region) => ({
@@ -142,12 +145,12 @@ ipcMain.handle('workspaces:create', async (_event, input: CreateWorkspaceInput):
   return workspace;
 });
 
-ipcMain.handle('workspaces:delete', async (_event, id: string): Promise<void> => {
+handleTrusted('workspaces:delete', async (_event, id: string): Promise<void> => {
   const workspaces = await readWorkspaces();
   await writeWorkspaces(workspaces.filter((workspace) => workspace.id !== id));
 });
 
-ipcMain.handle('workspaces:restore', async (_event, id: string): Promise<RestoreResult> => {
+handleTrusted('workspaces:restore', async (_event, id: string): Promise<RestoreResult> => {
   const workspaces = await readWorkspaces();
   const workspace = workspaces.find((item) => item.id === id);
   if (!workspace) {
@@ -157,7 +160,7 @@ ipcMain.handle('workspaces:restore', async (_event, id: string): Promise<Restore
   return sendWindowControlCommand<RestoreResult>('restore', { windows: workspace.windows });
 });
 
-ipcMain.handle('templates:restore', async (_event, id: string): Promise<RestoreResult> => {
+handleTrusted('templates:restore', async (_event, id: string): Promise<RestoreResult> => {
   const templates = await readTemplates();
   const template = templates.find((item) => item.id === id);
   if (!template) {
@@ -167,7 +170,7 @@ ipcMain.handle('templates:restore', async (_event, id: string): Promise<RestoreR
   return sendWindowControlCommand<RestoreResult>('restore', { windows: template.windows });
 });
 
-ipcMain.handle('layout:apply', async (_event, input: ApplyLayoutInput): Promise<RestoreResult> => {
+handleTrusted('layout:apply', async (_event, input: ApplyLayoutInput): Promise<RestoreResult> => {
   const restorableWindows = input.windows.filter(isRestorableWindow);
 
   if (restorableWindows.length === 0) {
@@ -177,7 +180,7 @@ ipcMain.handle('layout:apply', async (_event, input: ApplyLayoutInput): Promise<
   return sendWindowControlCommand<RestoreResult>('restore', { windows: restorableWindows });
 });
 
-ipcMain.handle('window:focus', async (_event, hwnd: string): Promise<FocusWindowResult> => {
+handleTrusted('window:focus', async (_event, hwnd: string): Promise<FocusWindowResult> => {
   if (isBlankHwnd(hwnd)) {
     return {
       success: false,
@@ -189,7 +192,7 @@ ipcMain.handle('window:focus', async (_event, hwnd: string): Promise<FocusWindow
   return sendWindowControlCommand<FocusWindowResult>('focus', { hwnd });
 });
 
-ipcMain.handle('window:work', async (event, hwnd: string): Promise<FocusWindowResult> => {
+handleTrusted('window:work', async (event, hwnd: string): Promise<FocusWindowResult> => {
   if (isBlankHwnd(hwnd)) {
     return {
       success: false,
@@ -213,7 +216,7 @@ ipcMain.handle('window:work', async (event, hwnd: string): Promise<FocusWindowRe
   };
 });
 
-ipcMain.handle('window:command', async (_event, hwnd: string, command: WindowCommand): Promise<WindowCommandResult> => {
+handleTrusted('window:command', async (_event, hwnd: string, command: WindowCommand): Promise<WindowCommandResult> => {
   const allowedCommands = new Set<WindowCommand>(['focus', 'minimize', 'maximize', 'restore', 'close']);
 
   if (isBlankHwnd(hwnd)) {
@@ -237,7 +240,7 @@ ipcMain.handle('window:command', async (_event, hwnd: string, command: WindowCom
   return sendWindowControlCommand<WindowCommandResult>('command', { hwnd, command });
 });
 
-ipcMain.handle('app:set-overlay-mode', async (event, enabled: boolean): Promise<OverlayModeResult> => {
+handleTrusted('app:set-overlay-mode', async (event, enabled: boolean): Promise<OverlayModeResult> => {
   const controllerWindow = getControllerWindow(event);
   if (!controllerWindow) {
     return {
@@ -280,7 +283,7 @@ ipcMain.handle('app:set-overlay-mode', async (event, enabled: boolean): Promise<
   }
 });
 
-ipcMain.handle('window:relay-pointer', async (event, input: RelayPointerInput): Promise<RelayPointerResult> => {
+handleTrusted('window:relay-pointer', async (event, input: RelayPointerInput): Promise<RelayPointerResult> => {
   const controllerWindow = getControllerWindow(event);
   if (!controllerWindow) {
     return { success: false, hwnd: input.hwnd || '', error: 'InfiniteDesk controller window is not available.' };
@@ -320,11 +323,11 @@ ipcMain.handle('window:relay-pointer', async (event, input: RelayPointerInput): 
   };
 });
 
-ipcMain.handle('app:quit', (): void => {
+handleTrusted('app:quit', (): void => {
   app.quit();
 });
 
-ipcMain.handle('window:embed', async (event, params: EmbedWindowParams): Promise<EmbedResult> => {
+handleTrusted('window:embed', async (event, params: EmbedWindowParams): Promise<EmbedResult> => {
   const controllerWindow = getControllerWindow(event);
   if (!controllerWindow) {
     return {
@@ -376,7 +379,7 @@ ipcMain.handle('window:embed', async (event, params: EmbedWindowParams): Promise
   return result;
 });
 
-ipcMain.handle('window:detach-embedded', async (_event, hwnd: string): Promise<EmbedResult> => {
+handleTrusted('window:detach-embedded', async (_event, hwnd: string): Promise<EmbedResult> => {
   if (isBlankHwnd(hwnd)) {
     return {
       success: false,
@@ -388,7 +391,7 @@ ipcMain.handle('window:detach-embedded', async (_event, hwnd: string): Promise<E
   return detachEmbeddedWindow(hwnd);
 });
 
-ipcMain.handle('window:move-embedded', async (_event, params: MoveEmbeddedWindowParams): Promise<EmbedResult> => {
+handleTrusted('window:move-embedded', async (_event, params: MoveEmbeddedWindowParams): Promise<EmbedResult> => {
   if (isBlankHwnd(params.hwnd)) {
     return {
       success: false,
@@ -408,7 +411,7 @@ ipcMain.handle('window:move-embedded', async (_event, params: MoveEmbeddedWindow
   return queueEmbeddedMove(params);
 });
 
-ipcMain.handle('dwm:sync-previews', (event, previews: DwmPreviewWindow[]): DwmPreviewResult => {
+handleTrusted('dwm:sync-previews', (event, previews: DwmPreviewWindow[]): DwmPreviewResult => {
   const controllerWindow = getControllerWindow(event);
   if (!controllerWindow) {
     return {
@@ -420,16 +423,16 @@ ipcMain.handle('dwm:sync-previews', (event, previews: DwmPreviewWindow[]): DwmPr
   return recordDwmPreviewSync(controllerWindow, previews);
 });
 
-ipcMain.handle('dwm:clear-previews', (): DwmPreviewResult => {
+handleTrusted('dwm:clear-previews', (): DwmPreviewResult => {
   return sendDwmPreviewCommand({ action: 'clear' });
 });
 
-ipcMain.handle('dock:list-apps', async (): Promise<DockApp[]> => {
+handleTrusted('dock:list-apps', async (): Promise<DockApp[]> => {
   return listLocalDockApps();
 });
 
-ipcMain.handle('dock:launch-app', async (_event, dockApp: DockApp): Promise<LaunchResult> => {
-  return launchDockApp(dockApp);
+handleTrusted('dock:launch-app', async (_event, appId: string): Promise<LaunchResult> => {
+  return launchDockApp(appId);
 });
 
 app.whenReady().then(() => {

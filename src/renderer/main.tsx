@@ -293,7 +293,7 @@ function App(): React.JSX.Element {
     setLaunchingAppId(dockApp.id);
     setError(null);
     try {
-      const result = await window.infiniteDesk.launchApp(dockApp);
+      const result = await window.infiniteDesk.launchApp(dockApp.id);
       if (!result.success) {
         setError(result.error || `${dockApp.name} could not be launched.`);
         return;
