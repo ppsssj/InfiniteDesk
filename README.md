@@ -4,9 +4,26 @@
   <img src="docs/assets/logo-concept.png" alt="InfiniteDesk logo concept" width="320" />
 </p>
 
+<p align="center">
+  <a href="README_EN.md">English</a> | 한국어
+</p>
+
+<p align="center">
+  <a href="https://github.com/ppsssj/InfiniteDesk/releases/download/v0.1.0/InfiniteDesk.Setup.0.1.0.exe"><strong>Download InfiniteDesk 0.1.0 for Windows</strong></a>
+</p>
+
 InfiniteDesk는 실행 중인 Windows 앱 창을 한 작업 공간에서 보고, 배치하고, 다시 실제 데스크톱에 적용하는 데스크톱 레이아웃 컨트롤러입니다.
 
-여러 앱을 동시에 쓰는 작업 환경에서 창 위치를 매번 다시 맞추지 않고, 자주 쓰는 배치를 템플릿처럼 저장하고 불러오는 것을 목표로 합니다.
+여러 앱을 동시에 쓰는 작업 환경에서 창 위치를 매번 다시 맞추지 않고, 자주 쓰는 배치를 Workspace로 저장하고 다시 불러오는 것을 목표로 합니다.
+
+## 다운로드
+
+최신 GitHub Release에서 Windows 설치 파일을 받을 수 있습니다.
+
+- [InfiniteDesk 0.1.0 다운로드](https://github.com/ppsssj/InfiniteDesk/releases/download/v0.1.0/InfiniteDesk.Setup.0.1.0.exe)
+- [전체 릴리스 보기](https://github.com/ppsssj/InfiniteDesk/releases)
+
+현재 설치 파일은 코드서명 인증서로 서명되어 있지 않으므로 Windows SmartScreen 또는 보안 경고가 표시될 수 있습니다.
 
 ## Demo
 
@@ -26,8 +43,9 @@ InfiniteDesk는 실행 중인 Windows 앱 창을 한 작업 공간에서 보고,
 - DWM 기반 실시간 창 미리보기
 - 캔버스에서 창 카드 이동 및 배치 편집
 - 실제 Windows 창 위치와 크기에 레이아웃 적용
-- Ctrl+Drag 박스 선택으로 여러 창을 한 번에 선택
+- `Ctrl + Drag` 박스 선택으로 여러 창을 한 번에 선택
 - 선택된 창 그룹을 함께 이동
+- `Shift + Scroll`로 캔버스 좌우 이동
 - 자주 쓰는 창 배치를 Workspace로 저장
 - Dock에서 로컬 앱 검색 및 실행
 - Mirror Control로 미리보기 영역에서 원본 창 클릭, 드래그, 스크롤 전달
@@ -80,9 +98,7 @@ npm run package:win
 
 ## 배포 상태
 
-InfiniteDesk는 현재 pre-release 상태입니다. GitHub Releases를 통해 Windows 설치 파일을 배포할 수 있습니다.
-
-현재 빌드는 코드서명 인증서로 서명되어 있지 않으므로 Windows SmartScreen 또는 보안 경고가 표시될 수 있습니다.
+InfiniteDesk는 현재 초기 릴리스 상태입니다. GitHub Releases를 통해 Windows 설치 파일을 배포합니다.
 
 ## 개인정보
 
@@ -95,3 +111,4 @@ InfiniteDesk는 창 제목, 프로세스 이름, 창 위치/크기, DWM 미리�
 InfiniteDesk 자체 소스 코드, 디자인, 브랜딩, 자산, 문서는 오픈소스 라이선스로 배포되지 않습니다. 자세한 내용은 [NOTICE.md](NOTICE.md)를 확인하세요.
 
 서드파티 오픈소스 고지는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)를 확인하세요.
+
