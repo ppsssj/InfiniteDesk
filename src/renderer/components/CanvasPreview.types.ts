@@ -21,9 +21,8 @@ export type CanvasPreviewProps = {
   onClearDwmPreviews: () => void;
   onRelayPointerInput: (input: RelayPointerInput) => void;
   onScanWindows: () => void;
-  onSaveRegions: () => void;
+  onCanvasBackgroundPointerDown: () => void;
   onApplyWindows: (windows: VirtualWindowState[]) => void;
-  onSaveRegion: (region: TemplateRegion) => void;
   fitSignal: number;
   resetViewSignal: number;
   zoomInSignal: number;
@@ -43,12 +42,6 @@ export type PanDrag = {
   offsetY: number;
 };
 
-export type CreateRegionDrag = {
-  type: 'create-region';
-  startWorldX: number;
-  startWorldY: number;
-};
-
 export type WindowDrag = {
   type: 'window';
   key: string;
@@ -57,22 +50,18 @@ export type WindowDrag = {
   virtualX: number;
   virtualY: number;
   moved: boolean;
+  groupPositions: Array<{ key: string; virtualX: number; virtualY: number }>;
 };
 
-export type RegionDrag = {
-  type: 'region';
-  id: string;
-  startX: number;
-  startY: number;
-  regionX: number;
-  regionY: number;
-  windowPositions: Array<{ id: string; virtualX: number; virtualY: number }>;
+export type WindowSelectionDrag = {
+  type: 'select-windows';
+  startWorldX: number;
+  startWorldY: number;
 };
 
 export type ContextMenuState =
   | { type: 'canvas'; screenX: number; screenY: number; worldX: number; worldY: number }
-  | { type: 'window'; screenX: number; screenY: number; key: string }
-  | { type: 'region'; screenX: number; screenY: number; id: string };
+  | { type: 'window'; screenX: number; screenY: number; key: string };
 
 export type ScreenRect = {
   x: number;

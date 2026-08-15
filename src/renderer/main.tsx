@@ -1,23 +1,19 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { X } from 'lucide-react';
-import type { DetectedWindow, DockApp, LayoutTemplate, SavedWorkspace } from '../shared/types';
-import { createRegionFromTemplate, getWindowIdentity, getWindowsForRegion, updateRegionMembership } from './canvas/regions';
+import type { DetectedWindow, DockApp, SavedWorkspace } from '../shared/types';
+import { updateRegionMembership } from './canvas/regions';
 import {
   createInitialVirtualLayout,
   findExistingActivityTarget,
   refreshVirtualWindowMetadata,
-  toVirtualWindow,
   toVirtualWindows
 } from './canvas/windows';
 import type { TemplateRegion, VirtualWindowState } from './canvas/types';
 import {
   virtualWindowToDetected,
   restoreResultText,
-  workspaceRegionToTemplateRegion,
-  regionToWorkspaceRegion,
   processMatchesDockApp,
-  placeVirtualWindowInRegion,
   placeDetectedWindowsNearSource
 } from './canvas/layout-helpers';
 import { useWindowControlActions } from './hooks/useWindowControlActions';
@@ -26,9 +22,7 @@ import { Dock } from './components/Dock';
 import { BrandMenu } from './components/BrandMenu';
 import { ViewControls } from './components/ViewControls';
 import { StatusPanel } from './components/StatusPanel';
-import { RegionsList } from './components/RegionsList';
 import { WorkspaceList } from './components/WorkspaceList';
-import { TemplateList } from './components/TemplateList';
 import { defaultDockApps } from './dock/apps';
 import './styles/base.css';
 import './styles/theme.css';
@@ -43,14 +37,12 @@ function App(): React.JSX.Element {
   const [virtualWindows, setVirtualWindows] = useState<VirtualWindowState[]>([]);
   const [initialVirtualWindows, setInitialVirtualWindows] = useState<VirtualWindowState[]>([]);
   const [regions, setRegions] = useState<TemplateRegion[]>([]);
-  const [templates, setTemplates] = useState<LayoutTemplate[]>([]);
   const [workspaces, setWorkspaces] = useState<SavedWorkspace[]>([]);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [isBrandMenuOpen, setIsBrandMenuOpen] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
-  const [message, setMessage] = useState('Scan Windows to start. Then Ctrl+Drag on the canvas to create a template region.');
+  const [message, setMessage] = useState('Scan Windows to start. Drag windows to arrange them. Ctrl+Drag selects multiple windows.');
   const [error, setError] = useState<string | null>(null);
-  const [previewTemplate, setPreviewTemplate] = useState<LayoutTemplate | null>(null);
   const [previewWorkspace, setPreviewWorkspace] = useState<SavedWorkspace | null>(null);
   const [themeMode, setThemeMode] = useState<'mist' | 'graphite'>('mist');
   const [fitSignal, setFitSignal] = useState(0);
@@ -65,6 +57,7 @@ function App(): React.JSX.Element {
   const [localDockApps, setLocalDockApps] = useState<DockApp[]>([]);
   const [isLoadingDockApps, setIsLoadingDockApps] = useState(false);
   const [isDockOverlayActive, setIsDockOverlayActive] = useState(false);
+  const [closeDockSignal, setCloseDockSignal] = useState(0);
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
   const [overlayModeEnabled, setOverlayModeEnabled] = useState(false);
   const [embeddedWindowIds, setEmbeddedWindowIds] = useState<string[]>([]);
@@ -79,12 +72,8 @@ function App(): React.JSX.Element {
   const cameraFocusRequestIdRef = useRef(0);
   const hasCompletedInitialScanRef = useRef(false);
 
-  const canvasLabel = previewTemplate
-    ? `Previewing template: ${previewTemplate.name}`
-    : previewWorkspace
-      ? `Previewing workspace: ${previewWorkspace.name}`
-    : `${virtualWindows.length} windows - ${regions.length} regions`;
-  const dirtyCount = virtualWindows.filter((windowInfo) => windowInfo.isDirty).length + regions.filter((region) => region.isDirty).length;
+  const canvasLabel = previewWorkspace ? `Previewing workspace: ${previewWorkspace.name}` : `${virtualWindows.length} windows`;
+  const dirtyCount = virtualWindows.filter((windowInfo) => windowInfo.isDirty).length;
   const restorableCount = useMemo(() => windows.filter((windowInfo) => windowInfo.isRestorable && !windowInfo.isInternal).length, [windows]);
   const dockApps = useMemo(() => {
     const apps = [...defaultDockApps, ...localDockApps];
@@ -129,11 +118,6 @@ function App(): React.JSX.Element {
     setIsBrandMenuOpen
   });
 
-  async function loadTemplates(): Promise<void> {
-    const loaded = await window.infiniteDesk.listTemplates();
-    setTemplates(loaded);
-  }
-
   async function loadWorkspaces(): Promise<void> {
     const loaded = await window.infiniteDesk.listWorkspaces();
     setWorkspaces(loaded);
@@ -153,8 +137,6 @@ function App(): React.JSX.Element {
 
   function loadVirtualLayout(
     nextWindows: VirtualWindowState[],
-    nextRegions: TemplateRegion[],
-    template: LayoutTemplate | null,
     workspace: SavedWorkspace | null = null
   ): void {
     const normalizedWindows = nextWindows.map((windowInfo) => ({
@@ -163,16 +145,10 @@ function App(): React.JSX.Element {
       initialVirtualY: windowInfo.virtualY,
       isDirty: false
     }));
-    const normalizedRegions = updateRegionMembership(
-      normalizedWindows,
-      nextRegions.map((region) => ({ ...region, isDirty: false }))
-    );
-
     setVirtualWindows(normalizedWindows);
     setInitialVirtualWindows(normalizedWindows);
-    setRegions(normalizedRegions);
+    setRegions([]);
     setSelectedRegionId(null);
-    setPreviewTemplate(template);
     setPreviewWorkspace(workspace);
     setActivityWindowHwnds([]);
     setFitSignal((value) => value + 1);
@@ -185,7 +161,7 @@ function App(): React.JSX.Element {
       const detected = await window.infiniteDesk.scanWindows();
       const layout = createInitialVirtualLayout(detected);
       setWindows(detected);
-      loadVirtualLayout(layout, [], null);
+      loadVirtualLayout(layout);
       setMessage(`Scanned ${detected.length} windows. ${layout.length} are on the canvas.`);
     } catch (scanError) {
       setError((scanError as Error).message);
@@ -220,7 +196,6 @@ function App(): React.JSX.Element {
 
   async function scanAfterLaunch(dockApp: DockApp): Promise<void> {
     const startedAt = Date.now();
-    const regionIdAtLaunch = selectedRegionId;
     const hwndsAtLaunch = new Set(
       virtualWindowsRef.current.flatMap((windowInfo) => (windowInfo.hwnd ? [windowInfo.hwnd.toLowerCase()] : []))
     );
@@ -231,80 +206,28 @@ function App(): React.JSX.Element {
         await new Promise((resolve) => window.setTimeout(resolve, remainingDelay));
       }
 
-      if (!regionIdAtLaunch) {
-        await scanForNewWindows('', dockApp);
-        const matchingNewWindow = virtualWindowsRef.current.find(
-          (windowInfo) =>
-            processMatchesDockApp(virtualWindowToDetected(windowInfo), dockApp) &&
-            Boolean(windowInfo.hwnd) &&
-            !hwndsAtLaunch.has(windowInfo.hwnd!.toLowerCase())
-        );
-        if (matchingNewWindow) {
-          focusCameraOnWindow(matchingNewWindow?.hwnd);
-          return;
-        }
-        continue;
-      }
-
-      if (autoScanInFlightRef.current) {
-        continue;
-      }
-
-      autoScanInFlightRef.current = true;
-      try {
-        const detected = await window.infiniteDesk.scanWindows();
-        const isFinalAttempt = targetDelay === DOCK_LAUNCH_SCAN_DELAYS_MS[DOCK_LAUNCH_SCAN_DELAYS_MS.length - 1];
-        const matchedDetectedWindow =
-          detected.find(
-            (windowInfo) =>
-              processMatchesDockApp(windowInfo, dockApp) &&
-              Boolean(windowInfo.hwnd) &&
-              !hwndsAtLaunch.has(windowInfo.hwnd.toLowerCase())
-          ) ||
-          (isFinalAttempt ? detected.find((windowInfo) => processMatchesDockApp(windowInfo, dockApp)) : undefined);
-        const matchedVirtualWindow = matchedDetectedWindow ? toVirtualWindow(matchedDetectedWindow) : null;
-        if (!matchedVirtualWindow) {
-          continue;
-        }
-
-        setWindows(detected);
-        const activeRegion = regionsRef.current.find((region) => region.id === regionIdAtLaunch);
-        if (!activeRegion) {
-          return;
-        }
-
-        const nextWindow = placeVirtualWindowInRegion(matchedVirtualWindow, activeRegion, activeRegion.windowIds.length);
-        const currentWindows = virtualWindowsRef.current;
-        const nextWindows = [
-          ...currentWindows.filter((windowInfo) => getWindowIdentity(windowInfo) !== getWindowIdentity(nextWindow)),
-          nextWindow
-        ];
-        const nextInitialWindows = [
-          ...initialVirtualWindowsRef.current.filter(
-            (windowInfo) => getWindowIdentity(windowInfo) !== getWindowIdentity(nextWindow)
-          ),
-          { ...nextWindow, initialVirtualX: nextWindow.virtualX, initialVirtualY: nextWindow.virtualY, isDirty: false }
-        ];
-        const nextRegions = updateRegionMembership(nextWindows, regionsRef.current);
-        virtualWindowsRef.current = nextWindows;
-        initialVirtualWindowsRef.current = nextInitialWindows;
-        regionsRef.current = nextRegions;
-        setVirtualWindows(nextWindows);
-        setInitialVirtualWindows(nextInitialWindows);
-        setRegions(nextRegions);
-        setPreviewTemplate(null);
-        setPreviewWorkspace(null);
-        setSelectedRegionId(activeRegion.id);
-        focusCameraOnWindow(nextWindow.hwnd);
-        setMessage(`${dockApp.name} added to ${activeRegion.name}.`);
+      await scanForNewWindows('', dockApp);
+      const matchingNewWindow = virtualWindowsRef.current.find(
+        (windowInfo) =>
+          processMatchesDockApp(virtualWindowToDetected(windowInfo), dockApp) &&
+          Boolean(windowInfo.hwnd) &&
+          !hwndsAtLaunch.has(windowInfo.hwnd!.toLowerCase())
+      );
+      if (matchingNewWindow) {
+        focusCameraOnWindow(matchingNewWindow?.hwnd);
         return;
-      } catch (scanError) {
-        if (targetDelay === DOCK_LAUNCH_SCAN_DELAYS_MS[DOCK_LAUNCH_SCAN_DELAYS_MS.length - 1]) {
-          setError(`${dockApp.name} launched, but scanning failed: ${(scanError as Error).message}`);
-          return;
-        }
-      } finally {
-        autoScanInFlightRef.current = false;
+      }
+
+      if (targetDelay !== DOCK_LAUNCH_SCAN_DELAYS_MS[DOCK_LAUNCH_SCAN_DELAYS_MS.length - 1]) {
+        continue;
+      }
+
+      const existingMatchingWindow = virtualWindowsRef.current.find((windowInfo) =>
+        processMatchesDockApp(virtualWindowToDetected(windowInfo), dockApp)
+      );
+      if (existingMatchingWindow) {
+        focusCameraOnWindow(existingMatchingWindow.hwnd);
+        return;
       }
     }
 
@@ -327,64 +250,6 @@ function App(): React.JSX.Element {
       setError((launchError as Error).message);
     } finally {
       setLaunchingAppId(null);
-    }
-  }
-
-  async function saveSingleRegion(region: TemplateRegion): Promise<void> {
-    const regionWindows = getWindowsForRegion(virtualWindows, region);
-    if (regionWindows.length === 0) {
-      setError(`"${region.name}" has no windows to save.`);
-      return;
-    }
-
-    setError(null);
-    try {
-      await window.infiniteDesk.createTemplate({
-        name: region.name,
-        windows: regionWindows.map(virtualWindowToDetected)
-      });
-      await loadTemplates();
-      setRegions((current) => current.map((item) => (item.id === region.id ? { ...item, isDirty: false } : item)));
-      setMessage(`Saved region "${region.name}" with ${regionWindows.length} windows.`);
-    } catch (saveError) {
-      setError((saveError as Error).message);
-    }
-  }
-
-  async function saveRegions(): Promise<void> {
-    if (regions.length === 0) {
-      setError('Create a region with Ctrl+Drag before saving.');
-      return;
-    }
-
-    setError(null);
-    try {
-      let savedCount = 0;
-      for (const region of regions) {
-        const regionWindows = getWindowsForRegion(virtualWindows, region);
-        if (regionWindows.length === 0) {
-          continue;
-        }
-
-        await window.infiniteDesk.createTemplate({
-          name: region.name,
-          windows: regionWindows.map(virtualWindowToDetected)
-        });
-        savedCount++;
-      }
-
-      if (savedCount === 0) {
-        setError('No regions contain windows yet. Drag windows into a region before saving.');
-        return;
-      }
-
-      await loadTemplates();
-      setRegions((current) => current.map((region) => ({ ...region, isDirty: false })));
-      setMessage(`Saved ${savedCount} template regions.`);
-    } catch (saveError) {
-      setError((saveError as Error).message);
-    } finally {
-      setIsBrandMenuOpen(false);
     }
   }
 
@@ -476,7 +341,6 @@ function App(): React.JSX.Element {
       setVirtualWindows(nextWindows);
       setInitialVirtualWindows(nextInitialWindows);
       setRegions(nextRegions);
-      setPreviewTemplate(null);
       setPreviewWorkspace(null);
       const preferredHwnd = preferredDockApp
         ? detected.find(
@@ -548,13 +412,12 @@ function App(): React.JSX.Element {
     setRegions(nextRegions);
     setEmbeddedWindowIds((current) => current.filter((item) => item.toLowerCase() !== normalizedHwnd));
     setActivityWindowHwnds((current) => current.filter((item) => item !== normalizedHwnd));
-    setPreviewTemplate(null);
     setPreviewWorkspace(null);
     setMessage('A closed application window was removed from InfiniteDesk.');
   }
 
   async function saveWorkspace(): Promise<void> {
-    if (virtualWindows.length === 0 && regions.length === 0) {
+    if (virtualWindows.length === 0) {
       setError('There is no canvas state to save as a workspace.');
       return;
     }
@@ -575,15 +438,14 @@ function App(): React.JSX.Element {
       const workspace = await window.infiniteDesk.createWorkspace({
         name,
         windows: savedWindows.map(virtualWindowToDetected),
-        regions: regions.map(regionToWorkspaceRegion)
+        regions: []
       });
       await loadWorkspaces();
       setPreviewWorkspace(workspace);
-      setPreviewTemplate(null);
-      setRegions((current) => current.map((region) => ({ ...region, isDirty: false })));
+      setRegions([]);
       setVirtualWindows(savedWindows);
       setInitialVirtualWindows(savedWindows);
-      setMessage(`Saved workspace "${workspace.name}" with ${workspace.windows.length} windows and ${workspace.regions.length} regions.`);
+      setMessage(`Saved workspace "${workspace.name}" with ${workspace.windows.length} windows.`);
     } catch (saveError) {
       setError((saveError as Error).message);
     } finally {
@@ -593,16 +455,6 @@ function App(): React.JSX.Element {
 
   function toggleThemeMode(): void {
     setThemeMode((current) => (current === 'mist' ? 'graphite' : 'mist'));
-  }
-
-  async function restoreTemplate(template: LayoutTemplate): Promise<void> {
-    setError(null);
-    try {
-      const result = await window.infiniteDesk.restoreTemplate(template.id);
-      setMessage(`Restored "${template.name}". ${restoreResultText(result)}`);
-    } catch (restoreError) {
-      setError((restoreError as Error).message);
-    }
   }
 
   async function restoreWorkspace(workspace: SavedWorkspace): Promise<void> {
@@ -615,15 +467,6 @@ function App(): React.JSX.Element {
     }
   }
 
-  async function deleteTemplate(template: LayoutTemplate): Promise<void> {
-    await window.infiniteDesk.deleteTemplate(template.id);
-    if (previewTemplate?.id === template.id) {
-      setPreviewTemplate(null);
-    }
-    await loadTemplates();
-    setMessage(`Deleted "${template.name}".`);
-  }
-
   async function deleteWorkspace(workspace: SavedWorkspace): Promise<void> {
     await window.infiniteDesk.deleteWorkspace(workspace.id);
     if (previewWorkspace?.id === workspace.id) {
@@ -633,18 +476,10 @@ function App(): React.JSX.Element {
     setMessage(`Deleted workspace "${workspace.name}".`);
   }
 
-  function previewTemplateOnCanvas(template: LayoutTemplate): void {
-    const { region, windows: templateWindows } = createRegionFromTemplate(template);
-    loadVirtualLayout(templateWindows, region ? [region] : [], template);
-    setIsDrawerOpen(false);
-    setMessage(`Previewing template "${template.name}". Region bounds were created around saved windows.`);
-  }
-
   function previewWorkspaceOnCanvas(workspace: SavedWorkspace): void {
     const workspaceWindows = toVirtualWindows(workspace.windows);
-    const workspaceRegions = workspace.regions.map(workspaceRegionToTemplateRegion);
     setWindows(workspace.windows);
-    loadVirtualLayout(workspaceWindows, workspaceRegions, null, workspace);
+    loadVirtualLayout(workspaceWindows, workspace);
     setIsDrawerOpen(false);
     setMessage(`Loaded workspace "${workspace.name}" onto the canvas.`);
   }
@@ -657,7 +492,6 @@ function App(): React.JSX.Element {
   }
 
   useEffect(() => {
-    void loadTemplates();
     void loadWorkspaces();
     void loadDockApps();
     void scanWindows();
@@ -678,7 +512,7 @@ function App(): React.JSX.Element {
   useEffect(() => {
     const unsubscribeInteraction = window.infiniteDesk.onWindowInteractionComplete((sourceHwnd) => {
       acknowledgeWindowActivity(sourceHwnd);
-      if (previewTemplate || previewWorkspace) {
+      if (previewWorkspace) {
         return;
       }
       scheduleNewWindowScans(sourceHwnd);
@@ -693,11 +527,11 @@ function App(): React.JSX.Element {
       autoScanTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
       autoScanTimersRef.current = [];
     };
-  }, [previewTemplate, previewWorkspace]);
+  }, [previewWorkspace]);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
-      if (!hasCompletedInitialScanRef.current || isScanning || previewTemplate || previewWorkspace) {
+      if (!hasCompletedInitialScanRef.current || isScanning || previewWorkspace) {
         return;
       }
 
@@ -705,7 +539,7 @@ function App(): React.JSX.Element {
     }, AUTO_WINDOW_SCAN_INTERVAL_MS);
 
     return () => window.clearInterval(intervalId);
-  }, [isScanning, previewTemplate, previewWorkspace]);
+  }, [isScanning, previewWorkspace]);
 
   useEffect(() => {
     function handleShortcuts(event: KeyboardEvent): void {
@@ -724,7 +558,7 @@ function App(): React.JSX.Element {
         void scanWindows();
       } else if (event.key.toLowerCase() === 's') {
         event.preventDefault();
-        void saveRegions();
+        void saveWorkspace();
       } else if (event.key === 'Enter') {
         event.preventDefault();
         void applyCanvasLayout();
@@ -739,7 +573,7 @@ function App(): React.JSX.Element {
 
     window.addEventListener('keydown', handleShortcuts);
     return () => window.removeEventListener('keydown', handleShortcuts);
-  }, [virtualWindows, regions, overlayModeEnabled]);
+  }, [virtualWindows, overlayModeEnabled]);
 
   return (
     <main
@@ -750,7 +584,6 @@ function App(): React.JSX.Element {
           isOpen={isBrandMenuOpen}
           onToggle={() => setIsBrandMenuOpen((value) => !value)}
           onScan={() => void scanWindows()}
-          onSaveRegions={() => void saveRegions()}
           onSaveWorkspace={() => void saveWorkspace()}
           onApplyLayout={() => void applyCanvasLayout()}
           applyDisabled={virtualWindows.length === 0}
@@ -801,9 +634,8 @@ function App(): React.JSX.Element {
           onClearDwmPreviews={() => void clearDwmPreviews()}
           onRelayPointerInput={(input) => void relayPointerInput(input)}
           onScanWindows={() => void scanWindows()}
-          onSaveRegions={() => void saveRegions()}
+          onCanvasBackgroundPointerDown={() => setCloseDockSignal((value) => value + 1)}
           onApplyWindows={(targetWindows) => void applyWindows(targetWindows)}
-          onSaveRegion={(region) => void saveSingleRegion(region)}
           fitSignal={fitSignal}
           resetViewSignal={resetViewSignal}
           zoomInSignal={zoomInSignal}
@@ -826,27 +658,16 @@ function App(): React.JSX.Element {
           <StatusPanel
             message={message}
             restorableCount={restorableCount}
-            regionsCount={regions.length}
             dirtyCount={dirtyCount}
             workspacesCount={workspaces.length}
-            templatesCount={templates.length}
             overlayModeEnabled={overlayModeEnabled}
           />
-
-          <RegionsList regions={regions} selectedRegionId={selectedRegionId} />
 
           <WorkspaceList
             workspaces={workspaces}
             onPreview={previewWorkspaceOnCanvas}
             onRestore={(workspace) => void restoreWorkspace(workspace)}
             onDelete={(workspace) => void deleteWorkspace(workspace)}
-          />
-
-          <TemplateList
-            templates={templates}
-            onPreview={previewTemplateOnCanvas}
-            onRestore={(template) => void restoreTemplate(template)}
-            onDelete={(template) => void deleteTemplate(template)}
           />
         </aside>
       </section>
@@ -858,6 +679,7 @@ function App(): React.JSX.Element {
           statusLabel={canvasLabel}
           launchingAppId={launchingAppId}
           isLoadingApps={isLoadingDockApps}
+          closeSignal={closeDockSignal}
           onLaunch={(dockApp) => void launchDockApp(dockApp)}
           onOverlayActiveChange={setIsDockOverlayActive}
         />

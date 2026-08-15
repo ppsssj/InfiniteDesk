@@ -1,16 +1,13 @@
 import React from 'react';
-import type { TemplateRegion, VirtualWindowState } from '../canvas/types';
+import type { VirtualWindowState } from '../canvas/types';
 import type { WindowCommand } from '../../shared/types';
 import type { ContextMenuState } from './CanvasPreview.types';
 
 type CanvasContextMenuProps = {
   contextMenu: ContextMenuState;
   contextWindow: VirtualWindowState | null;
-  contextRegion: TemplateRegion | null;
   onClose: () => void;
   onScanWindows: () => void;
-  onCreateRegionHere: (worldX: number, worldY: number) => void;
-  onSaveRegions: () => void;
   onFitView: () => void;
   onResetView: () => void;
   onZoomToWindow: (windowInfo: VirtualWindowState) => void;
@@ -19,20 +16,13 @@ type CanvasContextMenuProps = {
   onApplyWindow: (windowInfo: VirtualWindowState) => void;
   onResetWindowPosition: (key: string) => void;
   onRemoveWindowFromCanvas: (key: string) => void;
-  onRenameRegion: (region: TemplateRegion) => void;
-  onSaveRegion: (region: TemplateRegion) => void;
-  onApplyRegion: (region: TemplateRegion) => void;
-  onDeleteRegion: (id: string) => void;
 };
 
 export function CanvasContextMenu({
   contextMenu,
   contextWindow,
-  contextRegion,
   onClose,
   onScanWindows,
-  onCreateRegionHere,
-  onSaveRegions,
   onFitView,
   onResetView,
   onZoomToWindow,
@@ -40,11 +30,7 @@ export function CanvasContextMenu({
   onRunWindowCommand,
   onApplyWindow,
   onResetWindowPosition,
-  onRemoveWindowFromCanvas,
-  onRenameRegion,
-  onSaveRegion,
-  onApplyRegion,
-  onDeleteRegion
+  onRemoveWindowFromCanvas
 }: CanvasContextMenuProps): React.JSX.Element {
   function closeThen(action: () => void): void {
     onClose();
@@ -56,8 +42,6 @@ export function CanvasContextMenu({
       {contextMenu.type === 'canvas' ? (
         <>
           <button onClick={() => closeThen(onScanWindows)}>Scan Windows</button>
-          <button onClick={() => closeThen(() => onCreateRegionHere(contextMenu.worldX, contextMenu.worldY))}>Create Region Here</button>
-          <button onClick={() => closeThen(onSaveRegions)}>Save Regions</button>
           <button onClick={() => closeThen(onFitView)}>Fit View</button>
           <button onClick={() => closeThen(onResetView)}>Reset View</button>
         </>
@@ -84,14 +68,6 @@ export function CanvasContextMenu({
         </>
       ) : null}
 
-      {contextMenu.type === 'region' && contextRegion ? (
-        <>
-          <button onClick={() => closeThen(() => onRenameRegion(contextRegion))}>Rename Region</button>
-          <button onClick={() => closeThen(() => onSaveRegion(contextRegion))}>Save This Region</button>
-          <button onClick={() => closeThen(() => onApplyRegion(contextRegion))}>Apply Region</button>
-          <button onClick={() => closeThen(() => onDeleteRegion(contextRegion.id))}>Delete Region</button>
-        </>
-      ) : null}
     </div>
   );
 }

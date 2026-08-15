@@ -1,21 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Focus, Maximize2, Minimize2, RotateCcw, X } from 'lucide-react';
 import { clampScale, easeOutCubic, interpolateCanvasTransform, screenToWorld, worldToScreen, type CanvasTransform } from '../canvas/transform';
-import { getWindowIdentity, updateRegionMembership } from '../canvas/regions';
+import { updateRegionMembership } from '../canvas/regions';
 import type { DwmPreviewWindow, WindowCommand } from '../../shared/types';
 import type { TemplateRegion, VirtualWindowState } from '../canvas/types';
-import type { CanvasPreviewProps, PanDrag, CreateRegionDrag, WindowDrag, RegionDrag, ContextMenuState } from './CanvasPreview.types';
+import type { CanvasPreviewProps, PanDrag, WindowDrag, WindowSelectionDrag, ContextMenuState } from './CanvasPreview.types';
 import {
-  DEFAULT_REGION_WIDTH,
-  DEFAULT_REGION_HEIGHT,
-  MIN_REGION_WIDTH,
-  MIN_REGION_HEIGHT,
   OVERVIEW_CONTENT_INSET,
   OVERVIEW_TITLEBAR_HEIGHT,
-  COMPACT_OVERVIEW_SCALE,
-  REGION_COLORS
+  COMPACT_OVERVIEW_SCALE
 } from './CanvasPreview.constants';
-import { getWindowKey, normalizeDraftRegion, getSafeCanvasBounds } from './CanvasPreview.helpers';
+import { getWindowKey, getSafeCanvasBounds } from './CanvasPreview.helpers';
 import { WindowPlaceholder } from './WindowPlaceholder';
 import { CanvasContextMenu } from './CanvasContextMenu';
 import { useViewportVersion } from '../hooks/useViewportVersion';
@@ -45,9 +40,8 @@ export function CanvasPreview({
   onClearDwmPreviews,
   onRelayPointerInput,
   onScanWindows,
-  onSaveRegions,
+  onCanvasBackgroundPointerDown,
   onApplyWindows,
-  onSaveRegion,
   fitSignal,
   resetViewSignal,
   zoomInSignal,
@@ -59,14 +53,15 @@ export function CanvasPreview({
   onZoomChange
 }: CanvasPreviewProps): React.JSX.Element {
   const canvasRef = useRef<HTMLDivElement | null>(null);
-  const dragRef = useRef<PanDrag | CreateRegionDrag | WindowDrag | RegionDrag | null>(null);
+  const dragRef = useRef<PanDrag | WindowDrag | WindowSelectionDrag | null>(null);
   const windowsRef = useRef(windows);
   const regionsRef = useRef(regions);
   const handledCameraFocusRequestRef = useRef(0);
   const cameraAnimationFrameRef = useRef<number | null>(null);
   const transformRef = useRef<CanvasTransform>({ offsetX: 0, offsetY: 0, scale: 1 });
-  const [dragMode, setDragMode] = useState<'none' | 'pan' | 'window' | 'region' | 'create-region'>('none');
-  const [draftRegion, setDraftRegion] = useState<TemplateRegion | null>(null);
+  const [dragMode, setDragMode] = useState<'none' | 'pan' | 'window' | 'select-windows'>('none');
+  const [selectedWindowKeys, setSelectedWindowKeys] = useState<string[]>([]);
+  const [selectionRect, setSelectionRect] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const embeddedWindowIdSet = useMemo(() => new Set(embeddedWindowIds), [embeddedWindowIds]);
   const activityWindowHwndSet = useMemo(
@@ -127,6 +122,8 @@ export function CanvasPreview({
 
   useEffect(() => {
     windowsRef.current = windows;
+    const visibleKeys = new Set(windows.map((windowInfo, index) => getWindowKey(windowInfo, index)));
+    setSelectedWindowKeys((current) => current.filter((key) => visibleKeys.has(key)));
   }, [windows]);
 
   useEffect(() => {
@@ -243,22 +240,24 @@ export function CanvasPreview({
     return () => window.removeEventListener('keydown', closeContextMenu);
   }, []);
 
-  function createRegionAt(worldX: number, worldY: number): void {
-    const defaultName = `Template ${regionsRef.current.length + 1}`;
-    const name = window.prompt('Name template region', defaultName)?.trim() || defaultName;
-    const nextRegion: TemplateRegion = {
-      id: crypto.randomUUID(),
-      name,
-      x: Math.round(worldX),
-      y: Math.round(worldY),
-      width: DEFAULT_REGION_WIDTH,
-      height: DEFAULT_REGION_HEIGHT,
-      windowIds: [],
-      color: REGION_COLORS[regionsRef.current.length % REGION_COLORS.length],
-      createdAt: new Date().toISOString(),
-      isDirty: true
+  function normalizeSelectionRect(startX: number, startY: number, endX: number, endY: number): { x: number; y: number; width: number; height: number } {
+    const x = Math.min(startX, endX);
+    const y = Math.min(startY, endY);
+    return {
+      x,
+      y,
+      width: Math.abs(endX - startX),
+      height: Math.abs(endY - startY)
     };
-    onRegionsChange(updateRegionMembership(windowsRef.current, [...regionsRef.current, nextRegion]));
+  }
+
+  function windowIntersectsSelection(windowInfo: VirtualWindowState, rect: { x: number; y: number; width: number; height: number }): boolean {
+    return (
+      windowInfo.virtualX < rect.x + rect.width &&
+      windowInfo.virtualX + windowInfo.width > rect.x &&
+      windowInfo.virtualY < rect.y + rect.height &&
+      windowInfo.virtualY + windowInfo.height > rect.y
+    );
   }
 
   function handleCanvasPointerDown(event: React.PointerEvent<HTMLDivElement>): void {
@@ -269,6 +268,7 @@ export function CanvasPreview({
     cancelCameraAnimation();
     setContextMenu(null);
     onSelectRegion(null);
+    onCanvasBackgroundPointerDown();
     const canvas = canvasRef.current;
     if (!canvas) {
       return;
@@ -281,23 +281,14 @@ export function CanvasPreview({
     if (event.ctrlKey) {
       const worldPoint = screenToWorld(screenX, screenY, transform);
       dragRef.current = {
-        type: 'create-region',
+        type: 'select-windows',
         startWorldX: worldPoint.x,
         startWorldY: worldPoint.y
       };
-      setDraftRegion({
-        id: 'draft',
-        name: 'New Template',
-        x: worldPoint.x,
-        y: worldPoint.y,
-        width: 0,
-        height: 0,
-        windowIds: [],
-        color: REGION_COLORS[regions.length % REGION_COLORS.length],
-        createdAt: new Date().toISOString()
-      });
-      setDragMode('create-region');
+      setSelectionRect({ x: worldPoint.x, y: worldPoint.y, width: 0, height: 0 });
+      setDragMode('select-windows');
     } else {
+      setSelectedWindowKeys([]);
       dragRef.current = {
         type: 'pan',
         startX: event.clientX,
@@ -326,6 +317,14 @@ export function CanvasPreview({
     cancelCameraAnimation();
     setContextMenu(null);
     event.stopPropagation();
+    const currentSelection = selectedWindowKeys.includes(key) ? selectedWindowKeys : [key];
+    const nextSelection = event.ctrlKey
+      ? selectedWindowKeys.includes(key)
+        ? selectedWindowKeys.filter((selectedKey) => selectedKey !== key)
+        : [...selectedWindowKeys, key]
+      : currentSelection;
+    const dragSelection = nextSelection.length > 0 ? nextSelection : [key];
+    setSelectedWindowKeys(dragSelection);
     dragRef.current = {
       type: 'window',
       key,
@@ -333,58 +332,17 @@ export function CanvasPreview({
       startY: event.clientY,
       virtualX: windowInfo.virtualX,
       virtualY: windowInfo.virtualY,
-      moved: false
+      moved: false,
+      groupPositions: windowsRef.current
+        .map((candidate, index) => ({
+          key: getWindowKey(candidate, index),
+          virtualX: candidate.virtualX,
+          virtualY: candidate.virtualY
+        }))
+        .filter((candidate) => dragSelection.includes(candidate.key))
     };
     setDragMode('window');
     event.currentTarget.setPointerCapture(event.pointerId);
-  }
-
-  function handleRegionPointerDown(event: React.PointerEvent<HTMLElement>, region: TemplateRegion): void {
-    if (event.button !== 0) {
-      return;
-    }
-
-    cancelCameraAnimation();
-    setContextMenu(null);
-    onSelectRegion(region.id);
-    event.stopPropagation();
-    const ids = new Set(region.windowIds);
-    dragRef.current = {
-      type: 'region',
-      id: region.id,
-      startX: event.clientX,
-      startY: event.clientY,
-      regionX: region.x,
-      regionY: region.y,
-      windowPositions: windows
-        .filter((windowInfo) => ids.has(getWindowIdentity(windowInfo)))
-        .map((windowInfo) => ({
-          id: getWindowIdentity(windowInfo),
-          virtualX: windowInfo.virtualX,
-          virtualY: windowInfo.virtualY
-        }))
-    };
-    setDragMode('region');
-    event.currentTarget.setPointerCapture(event.pointerId);
-  }
-
-  function renameRegion(region: TemplateRegion): void {
-    const name = window.prompt('Rename template region', region.name);
-    if (!name || name.trim().length === 0) {
-      return;
-    }
-
-    onRegionsChange(
-      regionsRef.current.map((item) =>
-        item.id === region.id
-          ? {
-              ...item,
-              name: name.trim(),
-              isDirty: true
-            }
-          : item
-      )
-    );
   }
 
   function handlePointerMove(event: React.PointerEvent<HTMLDivElement>): void {
@@ -402,22 +360,14 @@ export function CanvasPreview({
       return;
     }
 
-    if (drag.type === 'create-region') {
+    if (drag.type === 'select-windows') {
       const canvas = canvasRef.current;
       if (!canvas) {
         return;
       }
       const rect = canvas.getBoundingClientRect();
       const worldPoint = screenToWorld(event.clientX - rect.left, event.clientY - rect.top, transform);
-      setDraftRegion((current) =>
-        current
-          ? {
-              ...current,
-              width: worldPoint.x - drag.startWorldX,
-              height: worldPoint.y - drag.startWorldY
-            }
-          : current
-      );
+      setSelectionRect(normalizeSelectionRect(drag.startWorldX, drag.startWorldY, worldPoint.x, worldPoint.y));
       return;
     }
 
@@ -426,15 +376,17 @@ export function CanvasPreview({
 
     if (drag.type === 'window') {
       drag.moved = Math.abs(deltaX) > 2 || Math.abs(deltaY) > 2;
+      const groupPositions = new Map(drag.groupPositions.map((item) => [item.key, item]));
       const nextWindows = windowsRef.current.map((windowInfo, index) => {
-        if (getWindowKey(windowInfo, index) !== drag.key) {
+        const startingPosition = groupPositions.get(getWindowKey(windowInfo, index));
+        if (!startingPosition) {
           return windowInfo;
         }
 
         return {
           ...windowInfo,
-          virtualX: Math.round(drag.virtualX + deltaX),
-          virtualY: Math.round(drag.virtualY + deltaY),
+          virtualX: Math.round(startingPosition.virtualX + deltaX),
+          virtualY: Math.round(startingPosition.virtualY + deltaY),
           isDirty: true
         };
       });
@@ -442,61 +394,23 @@ export function CanvasPreview({
       onWindowsChange(nextWindows);
       return;
     }
-
-    const movingIds = new Map(drag.windowPositions.map((item) => [item.id, item]));
-    const nextRegions = regionsRef.current.map((region) =>
-      region.id === drag.id
-        ? {
-            ...region,
-            x: Math.round(drag.regionX + deltaX),
-            y: Math.round(drag.regionY + deltaY),
-            isDirty: true
-          }
-        : region
-    );
-    const nextWindows = windowsRef.current.map((windowInfo) => {
-      const startingPosition = movingIds.get(getWindowIdentity(windowInfo));
-      if (!startingPosition) {
-        return windowInfo;
-      }
-
-      return {
-        ...windowInfo,
-        virtualX: Math.round(startingPosition.virtualX + deltaX),
-        virtualY: Math.round(startingPosition.virtualY + deltaY),
-        isDirty: true
-      };
-    });
-
-    windowsRef.current = nextWindows;
-    regionsRef.current = nextRegions;
-    onWindowsChange(nextWindows);
-    onRegionsChange(nextRegions);
   }
 
   function handlePointerUp(event: React.PointerEvent<HTMLDivElement>): void {
     const drag = dragRef.current;
 
-    if (drag?.type === 'create-region' && draftRegion) {
-      const normalized = normalizeDraftRegion(draftRegion);
-      if (normalized.width >= MIN_REGION_WIDTH && normalized.height >= MIN_REGION_HEIGHT) {
-        const defaultName = `Template ${regions.length + 1}`;
-        const name = window.prompt('Name template region', defaultName)?.trim() || defaultName;
-        const nextRegion: TemplateRegion = {
-          ...normalized,
-          id: crypto.randomUUID(),
-          name,
-          isDirty: true
-        };
-        onRegionsChange(updateRegionMembership(windowsRef.current, [...regionsRef.current, nextRegion]));
-      }
-    } else if (drag?.type === 'window' || drag?.type === 'region') {
+    if (drag?.type === 'select-windows' && selectionRect) {
+      const nextSelectedKeys = windowsRef.current.flatMap((windowInfo, index) =>
+        windowIntersectsSelection(windowInfo, selectionRect) ? [getWindowKey(windowInfo, index)] : []
+      );
+      setSelectedWindowKeys(nextSelectedKeys);
+    } else if (drag?.type === 'window') {
       onRegionsChange(updateRegionMembership(windowsRef.current, regionsRef.current));
       flushEmbeddedWindowPositions();
     }
 
     dragRef.current = null;
-    setDraftRegion(null);
+    setSelectionRect(null);
     setDragMode('none');
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
@@ -506,6 +420,14 @@ export function CanvasPreview({
   function handleWheel(event: React.WheelEvent<HTMLDivElement>): void {
     cancelCameraAnimation();
     event.preventDefault();
+    if (event.shiftKey) {
+      setTransform((current) => ({
+        ...current,
+        offsetX: current.offsetX - event.deltaY
+      }));
+      return;
+    }
+
     const canvas = canvasRef.current;
     if (!canvas) {
       return;
@@ -569,12 +491,6 @@ export function CanvasPreview({
     windowsRef.current = nextWindows;
     onWindowsChange(nextWindows);
     onRegionsChange(updateRegionMembership(nextWindows, regionsRef.current));
-  }
-
-  function deleteRegion(id: string): void {
-    const nextRegions = regionsRef.current.filter((region) => region.id !== id);
-    regionsRef.current = nextRegions;
-    onRegionsChange(nextRegions);
   }
 
   function runWindowCommand(windowInfo: VirtualWindowState, command: WindowCommand): void {
@@ -666,12 +582,11 @@ export function CanvasPreview({
     focusWindowNode(targetWindow);
   }, [cameraFocusRequest, windows]);
 
-  const renderedRegions = draftRegion ? [...regions, normalizeDraftRegion(draftRegion)] : regions;
   const contextWindow =
     contextMenu?.type === 'window'
       ? windows.find((windowInfo, index) => getWindowKey(windowInfo, index) === contextMenu.key)
       : null;
-  const contextRegion = contextMenu?.type === 'region' ? regions.find((region) => region.id === contextMenu.id) : null;
+  const selectedWindowKeySet = new Set(selectedWindowKeys);
 
   return (
     <section className="canvas-preview">
@@ -685,55 +600,10 @@ export function CanvasPreview({
         onWheel={handleWheel}
         onContextMenu={handleCanvasContextMenu}
       >
-        {renderedRegions.map((region) => {
-          const position = worldToScreen(region.x, region.y, transform);
-          return (
-            <section
-              className={`template-region ${region.id === 'draft' ? 'draft-region' : ''} ${region.isDirty ? 'dirty-region' : ''} ${
-                selectedRegionId === region.id ? 'selected-region' : ''
-              }`}
-              key={region.id}
-              style={{
-                left: position.x,
-                top: position.y,
-                width: region.width * transform.scale,
-                height: region.height * transform.scale,
-                borderColor: region.color,
-                backgroundColor: `${region.color || '#2f7666'}1f`
-              }}
-              onPointerDown={(event) => region.id !== 'draft' && handleRegionPointerDown(event, region)}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                const canvas = canvasRef.current;
-                if (!canvas) {
-                  return;
-                }
-                const rect = canvas.getBoundingClientRect();
-                setContextMenu({
-                  type: 'region',
-                  screenX: event.clientX - rect.left,
-                  screenY: event.clientY - rect.top,
-                  id: region.id
-                });
-                onSelectRegion(region.id);
-              }}
-            >
-              <button className="region-label" onDoubleClick={() => renameRegion(region)} title="Double-click to rename">
-                <strong>{region.name}</strong>
-                <span>{region.windowIds.length} windows</span>
-              </button>
-              {region.id !== 'draft' && region.windowIds.length === 0 ? (
-                <div className="region-empty-hint">Drop windows here or launch apps from Dock</div>
-              ) : null}
-            </section>
-          );
-        })}
-
         {windows.length === 0 ? (
           <div className="canvas-empty">
             <strong>Scan Windows to start.</strong>
-            <span>Then Ctrl+Drag on the canvas to create a template region.</span>
+            <span>Drag windows to arrange them. Ctrl+Drag selects multiple windows.</span>
           </div>
         ) : (
           windows.map((windowInfo, index) => {
@@ -745,11 +615,12 @@ export function CanvasPreview({
             );
             const isNativeEmbeddedVisible = shouldShowNativeEmbeddedWindow(windowInfo);
             const isCompactOverview = !isEmbedded && transform.scale < COMPACT_OVERVIEW_SCALE;
+            const isSelected = selectedWindowKeySet.has(key);
             return (
               <article
                 className={`virtual-window ${!isEmbedded ? 'overview-window' : ''} ${isCompactOverview ? 'compact-overview-window' : ''} ${windowInfo.isHelper ? 'helper-window' : ''} ${windowInfo.isDirty ? 'dirty-window' : ''} ${
                   isEmbedded ? 'embedded-window' : ''
-                } ${isEmbedded && !isNativeEmbeddedVisible ? 'embedded-overview-window' : ''} ${hasActivity ? 'activity-window' : ''}`}
+                } ${isEmbedded && !isNativeEmbeddedVisible ? 'embedded-overview-window' : ''} ${hasActivity ? 'activity-window' : ''} ${isSelected ? 'selected-window' : ''}`}
                 key={key}
                 title={isCompactOverview ? `${windowInfo.title} — ${windowInfo.processName}` : undefined}
                 style={{
@@ -848,15 +719,24 @@ export function CanvasPreview({
           })
         )}
 
+        {selectionRect ? (
+          <div
+            className="window-selection-box"
+            style={{
+              left: worldToScreen(selectionRect.x, selectionRect.y, transform).x,
+              top: worldToScreen(selectionRect.x, selectionRect.y, transform).y,
+              width: selectionRect.width * transform.scale,
+              height: selectionRect.height * transform.scale
+            }}
+          />
+        ) : null}
+
         {contextMenu ? (
           <CanvasContextMenu
             contextMenu={contextMenu}
             contextWindow={contextWindow ?? null}
-            contextRegion={contextRegion ?? null}
             onClose={() => setContextMenu(null)}
             onScanWindows={onScanWindows}
-            onCreateRegionHere={createRegionAt}
-            onSaveRegions={onSaveRegions}
             onFitView={fitView}
             onResetView={() => setTransform(getDefaultTransform())}
             onZoomToWindow={zoomToWindowNode}
@@ -865,13 +745,6 @@ export function CanvasPreview({
             onApplyWindow={(windowInfo) => onApplyWindows([windowInfo])}
             onResetWindowPosition={resetWindowPosition}
             onRemoveWindowFromCanvas={removeWindowFromCanvas}
-            onRenameRegion={renameRegion}
-            onSaveRegion={onSaveRegion}
-            onApplyRegion={(region) => {
-              const ids = new Set(region.windowIds);
-              onApplyWindows(windows.filter((windowInfo) => ids.has(getWindowIdentity(windowInfo))));
-            }}
-            onDeleteRegion={deleteRegion}
           />
         ) : null}
       </div>

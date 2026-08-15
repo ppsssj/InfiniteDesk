@@ -25,7 +25,7 @@ export function WorkspaceList({ workspaces, onPreview, onRestore, onDelete }: Wo
               <div>
                 <h3>{workspace.name}</h3>
                 <p>
-                  {workspace.windows.length} windows - {workspace.regions.length} regions
+                  {workspace.windows.length} windows
                 </p>
               </div>
               <div className="template-actions">

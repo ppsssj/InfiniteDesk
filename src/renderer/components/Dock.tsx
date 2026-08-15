@@ -8,6 +8,7 @@ type DockProps = {
   statusLabel: string;
   launchingAppId: string | null;
   isLoadingApps: boolean;
+  closeSignal: number;
   onLaunch: (app: DockApp) => void;
   onOverlayActiveChange: (active: boolean) => void;
 };
@@ -24,7 +25,7 @@ function AppIcon({ app }: { app: DockApp }): React.JSX.Element {
   return <span>{getAppInitials(app)}</span>;
 }
 
-export function Dock({ apps, pinnedApps, statusLabel, launchingAppId, isLoadingApps, onLaunch, onOverlayActiveChange }: DockProps): React.JSX.Element {
+export function Dock({ apps, pinnedApps, statusLabel, launchingAppId, isLoadingApps, closeSignal, onLaunch, onOverlayActiveChange }: DockProps): React.JSX.Element {
   const [query, setQuery] = React.useState('');
   const [isAllAppsOpen, setIsAllAppsOpen] = React.useState(false);
   const normalizedQuery = query.trim().toLowerCase();
@@ -42,6 +43,11 @@ export function Dock({ apps, pinnedApps, statusLabel, launchingAppId, isLoadingA
     onOverlayActiveChange(shouldShowResults);
     return () => onOverlayActiveChange(false);
   }, [onOverlayActiveChange, shouldShowResults]);
+
+  React.useEffect(() => {
+    setQuery('');
+    setIsAllAppsOpen(false);
+  }, [closeSignal]);
 
   return (
     <div className="dock-launcher" data-dwm-ui-overlay="true">

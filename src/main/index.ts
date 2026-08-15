@@ -70,9 +70,15 @@ function getControllerWindow(event: IpcMainInvokeEvent): BrowserWindow | null {
   return controllerWindow;
 }
 
-handleTrusted('windows:scan', async (): Promise<DetectedWindow[]> => {
+handleTrusted('windows:scan', async (event): Promise<DetectedWindow[]> => {
   const result = await sendWindowControlCommand<DetectedWindow[] | DetectedWindow>('scan', {});
-  return Array.isArray(result) ? result : [result];
+  const windows = Array.isArray(result) ? result : [result];
+  const controllerWindow = getControllerWindow(event);
+  const controllerHwnd = controllerWindow
+    ? nativeWindowHandleToString(controllerWindow.getNativeWindowHandle()).toLowerCase()
+    : null;
+
+  return windows.filter((windowInfo) => windowInfo.hwnd.toLowerCase() !== controllerHwnd);
 });
 
 handleTrusted('templates:list', async (): Promise<LayoutTemplate[]> => {

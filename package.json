@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "description": "Windows-based desktop layout templates for real application windows.",
   "author": "ppsssj",
+  "license": "UNLICENSED",
+  "private": true,
   "repository": {
     "type": "git",
     "url": "https://github.com/ppsssj/InfiniteDesk.git"

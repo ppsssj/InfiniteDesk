@@ -261,6 +261,13 @@
     0 0 0 3px var(--accent-soft);
 }
 
+.virtual-window.selected-window {
+  border-color: color-mix(in srgb, var(--accent) 78%, white 12%);
+  box-shadow:
+    var(--shadow),
+    0 0 0 4px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
 .virtual-window.embedded-window {
   border-color: color-mix(in srgb, var(--warning) 58%, transparent);
   box-shadow:

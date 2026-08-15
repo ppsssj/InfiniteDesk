@@ -1,12 +1,11 @@
 import React from 'react';
-import { BriefcaseBusiness, LocateFixed, LogOut, Menu, Palette, RefreshCw, RotateCcw, Save, Send } from 'lucide-react';
+import { BriefcaseBusiness, LocateFixed, LogOut, Menu, Palette, RefreshCw, RotateCcw, Send } from 'lucide-react';
 import logoMarkUrl from '../assets/logo-mark.png';
 
 type BrandMenuProps = {
   isOpen: boolean;
   onToggle: () => void;
   onScan: () => void;
-  onSaveRegions: () => void;
   onSaveWorkspace: () => void;
   onApplyLayout: () => void;
   applyDisabled: boolean;
@@ -24,7 +23,6 @@ export function BrandMenu({
   isOpen,
   onToggle,
   onScan,
-  onSaveRegions,
   onSaveWorkspace,
   onApplyLayout,
   applyDisabled,
@@ -47,10 +45,6 @@ export function BrandMenu({
           <button onClick={onScan}>
             <RefreshCw size={15} />
             Scan Windows
-          </button>
-          <button onClick={onSaveRegions}>
-            <Save size={15} />
-            Save Regions
           </button>
           <button onClick={onSaveWorkspace}>
             <BriefcaseBusiness size={15} />
