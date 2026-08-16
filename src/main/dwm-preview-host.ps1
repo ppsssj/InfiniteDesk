@@ -134,10 +134,6 @@ namespace InfiniteDeskPreview {
     private static readonly Dictionary<long, AutomationTargetCache> scrollAutomationTargets = new Dictionary<long, AutomationTargetCache>();
     private static readonly Dictionary<long, AutomationTargetCache> clickAutomationTargets = new Dictionary<long, AutomationTargetCache>();
     private static readonly Dictionary<long, AutomationTargetCache> focusAutomationTargets = new Dictionary<long, AutomationTargetCache>();
-    private static readonly object codeScrollSync = new object();
-    private static System.Threading.Timer codeFocusRestoreTimer;
-    private static DateTime codeFocusRestoreAtUtc;
-    private static IntPtr pendingCodeController = IntPtr.Zero;
     private static long activeCodeSource;
     private static AutomationElement activeCodeInput;
 
@@ -274,8 +270,7 @@ namespace InfiniteDeskPreview {
       }
 
       if (phase == "wheel") {
-        IntPtr controller = ParseHwnd(input.controllerHwnd);
-        if (TryRelayAccessibleWheel(source, controller, screenPoint, input.wheelDelta)) {
+        if (TryRelayAccessibleWheel(source, screenPoint, input.wheelDelta)) {
           return;
         }
         FocusSource(source);
@@ -364,9 +359,19 @@ namespace InfiniteDeskPreview {
       }
     }
 
-    private static bool TryRelayAccessibleWheel(IntPtr source, IntPtr controller, Point screenPoint, int wheelDelta) {
+    private static bool TryRelayAccessibleWheel(IntPtr source, Point screenPoint, int wheelDelta) {
       if (wheelDelta == 0) {
         return true;
+      }
+
+      string processName = GetProcessName(source);
+      if (String.Equals(processName, "code", StringComparison.OrdinalIgnoreCase)) {
+        // Monaco can expose several scrollable UIA containers around the editor.
+        // Prefer the editor-specific route when the pointer is over code so a
+        // stale/outer ScrollPattern does not swallow the wheel.
+        if (TryScrollCodeEditor(source, screenPoint, wheelDelta)) {
+          return true;
+        }
       }
 
       // UIA describes the actual scroll surface for Chromium, WinUI, WPF and
@@ -377,14 +382,7 @@ namespace InfiniteDeskPreview {
         return true;
       }
 
-      string processName = GetProcessName(source);
-      if (String.Equals(processName, "code", StringComparison.OrdinalIgnoreCase)) {
-        // Monaco can omit ScrollPattern, so keep the editor keyboard fallback.
-        if (TryScrollCodeEditor(source, controller, screenPoint, wheelDelta)) {
-          return true;
-        }
-      }
-      return IsChromiumWindow(source) && TryScrollChromiumContent(source, controller, screenPoint, wheelDelta);
+      return IsChromiumWindow(source) && TryScrollChromiumContent(source, screenPoint, wheelDelta);
     }
 
     private static bool TryScrollAutomation(IntPtr source, Point screenPoint, int wheelDelta) {
@@ -548,7 +546,7 @@ namespace InfiniteDeskPreview {
         bounds.Left + "," + bounds.Top + "," + bounds.Width + "," + bounds.Height;
     }
 
-    private static bool TryScrollChromiumContent(IntPtr source, IntPtr controller, Point screenPoint, int wheelDelta) {
+    private static bool TryScrollChromiumContent(IntPtr source, Point screenPoint, int wheelDelta) {
       long sourceKey = source.ToInt64();
       for (int attempt = 0; attempt < 2; attempt++) {
         try {
@@ -611,7 +609,6 @@ namespace InfiniteDeskPreview {
             keybd_event(direction, 0, 0, UIntPtr.Zero);
             keybd_event(direction, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
           }
-          ScheduleCodeFocusRestore(controller);
           return true;
         } catch {
           focusAutomationTargets.Remove(sourceKey);
@@ -669,7 +666,7 @@ namespace InfiniteDeskPreview {
       return className.ToString();
     }
 
-    private static bool TryScrollCodeEditor(IntPtr source, IntPtr controller, Point screenPoint, int wheelDelta) {
+    private static bool TryScrollCodeEditor(IntPtr source, Point screenPoint, int wheelDelta) {
       long sourceKey = source.ToInt64();
       for (int attempt = 0; attempt < 2; attempt++) {
         try {
@@ -697,7 +694,6 @@ namespace InfiniteDeskPreview {
             keybd_event(direction, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
             keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
           }
-          ScheduleCodeFocusRestore(controller);
           return true;
         } catch {
           codeEditorTargets.Remove(sourceKey);
@@ -740,40 +736,6 @@ namespace InfiniteDeskPreview {
         }
       }
       return null;
-    }
-
-    private static void ScheduleCodeFocusRestore(IntPtr controller) {
-      if (controller == IntPtr.Zero || !IsWindow(controller)) {
-        return;
-      }
-      lock (codeScrollSync) {
-        pendingCodeController = controller;
-        codeFocusRestoreAtUtc = DateTime.UtcNow.AddMilliseconds(180);
-        if (codeFocusRestoreTimer == null) {
-          codeFocusRestoreTimer = new System.Threading.Timer(RestoreCodeFocus, null, 180, Timeout.Infinite);
-        } else {
-          codeFocusRestoreTimer.Change(180, Timeout.Infinite);
-        }
-      }
-    }
-
-    private static void RestoreCodeFocus(object state) {
-      IntPtr controller;
-      lock (codeScrollSync) {
-        int remaining = (int)Math.Ceiling((codeFocusRestoreAtUtc - DateTime.UtcNow).TotalMilliseconds);
-        if (remaining > 0) {
-          codeFocusRestoreTimer.Change(remaining, Timeout.Infinite);
-          return;
-        }
-        controller = pendingCodeController;
-        pendingCodeController = IntPtr.Zero;
-        activeCodeSource = 0;
-        activeCodeInput = null;
-      }
-      if (controller != IntPtr.Zero && IsWindow(controller)) {
-        KeepControllerAbove(controller);
-        FocusSource(controller);
-      }
     }
 
     private static IntPtr FindDeepestTarget(IntPtr source, Point screenPoint) {
