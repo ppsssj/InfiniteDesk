@@ -87,3 +87,21 @@ export function placeDetectedWindowsNearSource(
     };
   });
 }
+
+export function placeDetectedWindowsAtPoint(
+  detectedWindows: VirtualWindowState[],
+  point: { x: number; y: number }
+): VirtualWindowState[] {
+  return detectedWindows.map((windowInfo, index) => {
+    const virtualX = Math.round(point.x + (index % 3) * 72);
+    const virtualY = Math.round(point.y + index * 72);
+    return {
+      ...windowInfo,
+      virtualX,
+      virtualY,
+      initialVirtualX: virtualX,
+      initialVirtualY: virtualY,
+      isDirty: false
+    };
+  });
+}

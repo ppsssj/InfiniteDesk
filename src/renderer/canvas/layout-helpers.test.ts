@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  placeDetectedWindowsAtPoint,
   placeDetectedWindowsNearSource,
   placeVirtualWindowInRegion,
   processMatchesDockApp,
@@ -165,5 +166,17 @@ describe('placeDetectedWindowsNearSource', () => {
   it('falls back to a default origin when there is no source window and no existing windows', () => {
     const result = placeDetectedWindowsNearSource([makeWindow({ hwnd: 'new' })], [], 'missing');
     expect(result[0]).toMatchObject({ virtualX: 120, virtualY: 120, isDirty: false });
+  });
+});
+
+describe('placeDetectedWindowsAtPoint', () => {
+  it('places newly launched windows at the requested canvas point', () => {
+    const result = placeDetectedWindowsAtPoint([makeWindow({ hwnd: '0x1' }), makeWindow({ hwnd: '0x2' })], {
+      x: 420.4,
+      y: 180.6
+    });
+
+    expect(result[0]).toMatchObject({ virtualX: 420, virtualY: 181, initialVirtualX: 420, initialVirtualY: 181, isDirty: false });
+    expect(result[1]).toMatchObject({ virtualX: 492, virtualY: 253, initialVirtualX: 492, initialVirtualY: 253, isDirty: false });
   });
 });
