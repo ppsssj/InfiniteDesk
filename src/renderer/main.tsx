@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { X } from 'lucide-react';
-import type { DetectedWindow, DockApp, SavedWorkspace } from '../shared/types';
+import type { DetectedWindow, DockApp, QuickLaunch, SavedWorkspace } from '../shared/types';
 import { updateRegionMembership } from './canvas/regions';
 import {
   createInitialVirtualLayout,
@@ -14,7 +14,8 @@ import {
   virtualWindowToDetected,
   restoreResultText,
   processMatchesDockApp,
-  placeDetectedWindowsNearSource
+  placeDetectedWindowsNearSource,
+  placeDetectedWindowsAtPoint
 } from './canvas/layout-helpers';
 import { useWindowControlActions } from './hooks/useWindowControlActions';
 import { CanvasPreview } from './components/CanvasPreview';
@@ -24,7 +25,9 @@ import { BrandMenu } from './components/BrandMenu';
 import { ViewControls } from './components/ViewControls';
 import { StatusPanel } from './components/StatusPanel';
 import { WorkspaceList } from './components/WorkspaceList';
+import { QuickLaunchPanel, type QuickLaunchPanelLayout } from './components/QuickLaunchPanel';
 import { defaultDockApps } from './dock/apps';
+import { compareDockAppsByName, getDockAppIdentityKey, uniqueDockApps } from './dock/identity';
 import { isEditableShortcutTarget, isPrimaryShortcut } from './keyboard';
 import './styles/base.css';
 import './styles/theme.css';
@@ -34,6 +37,13 @@ const AUTO_WINDOW_SCAN_INTERVAL_MS = 700;
 const INTERACTION_SCAN_DELAYS_MS = [120, 400, 900, 1600] as const;
 const DOCK_LAUNCH_SCAN_DELAYS_MS = [100, 250, 500, 900, 1500, 2400] as const;
 const MAX_CANVAS_HISTORY = 80;
+const QUICK_LAUNCH_PANEL_LAYOUT_STORAGE_KEY = 'infinitedesk.quickLaunchPanelLayout';
+const DEFAULT_QUICK_LAUNCH_PANEL_LAYOUT: QuickLaunchPanelLayout = {
+  side: 'right',
+  y: 9999,
+  width: 300,
+  height: 260
+};
 
 type CanvasSnapshot = {
   windows: VirtualWindowState[];
@@ -41,6 +51,27 @@ type CanvasSnapshot = {
   previewWorkspace: SavedWorkspace | null;
   selectedRegionId: string | null;
 };
+
+type LaunchPlacementPoint = { x: number; y: number };
+
+function readQuickLaunchPanelLayout(): QuickLaunchPanelLayout {
+  try {
+    const raw = window.localStorage.getItem(QUICK_LAUNCH_PANEL_LAYOUT_STORAGE_KEY);
+    if (!raw) {
+      return DEFAULT_QUICK_LAUNCH_PANEL_LAYOUT;
+    }
+
+    const parsed = JSON.parse(raw) as Partial<QuickLaunchPanelLayout>;
+    return {
+      side: parsed.side === 'left' ? 'left' : 'right',
+      y: Number.isFinite(parsed.y) ? parsed.y! : DEFAULT_QUICK_LAUNCH_PANEL_LAYOUT.y,
+      width: Number.isFinite(parsed.width) ? parsed.width! : DEFAULT_QUICK_LAUNCH_PANEL_LAYOUT.width,
+      height: Number.isFinite(parsed.height) ? parsed.height! : DEFAULT_QUICK_LAUNCH_PANEL_LAYOUT.height
+    };
+  } catch {
+    return DEFAULT_QUICK_LAUNCH_PANEL_LAYOUT;
+  }
+}
 
 function App(): React.JSX.Element {
   const [windows, setWindows] = useState<DetectedWindow[]>([]);
@@ -66,6 +97,10 @@ function App(): React.JSX.Element {
   const [launchingAppId, setLaunchingAppId] = useState<string | null>(null);
   const [localDockApps, setLocalDockApps] = useState<DockApp[]>([]);
   const [userPinnedDockApps, setUserPinnedDockApps] = useState<DockApp[]>([]);
+  const [unpinnedDefaultDockAppIds, setUnpinnedDefaultDockAppIds] = useState<string[]>([]);
+  const [quickLaunches, setQuickLaunches] = useState<QuickLaunch[]>([]);
+  const [quickLaunchPanelLayout, setQuickLaunchPanelLayout] = useState<QuickLaunchPanelLayout>(readQuickLaunchPanelLayout);
+  const [quickLaunchPreviewFrameVersion, setQuickLaunchPreviewFrameVersion] = useState(0);
   const [isLoadingDockApps, setIsLoadingDockApps] = useState(false);
   const [isDockOverlayActive, setIsDockOverlayActive] = useState(false);
   const [closeDockSignal, setCloseDockSignal] = useState(0);
@@ -91,30 +126,50 @@ function App(): React.JSX.Element {
   const canvasLabel = previewWorkspace ? `Previewing workspace: ${previewWorkspace.name}` : `${virtualWindows.length} windows`;
   const dirtyCount = virtualWindows.filter((windowInfo) => windowInfo.isDirty).length;
   const restorableCount = useMemo(() => windows.filter((windowInfo) => windowInfo.isRestorable && !windowInfo.isInternal).length, [windows]);
-  const dockApps = useMemo(() => {
-    const apps = [...defaultDockApps, ...userPinnedDockApps, ...localDockApps];
-    const seen = new Set<string>();
-    return apps.filter((app) => {
-      const key = `${app.name.toLowerCase()}|${app.executablePath.toLowerCase()}`;
-      if (seen.has(key)) {
-        return false;
-      }
-      seen.add(key);
-      return true;
-    });
-  }, [localDockApps, userPinnedDockApps]);
+  const defaultDockAppIdSet = useMemo(() => new Set(defaultDockApps.map((dockApp) => dockApp.id)), []);
+  const visibleDefaultDockApps = useMemo(
+    () => defaultDockApps.filter((dockApp) => !unpinnedDefaultDockAppIds.includes(dockApp.id)),
+    [unpinnedDefaultDockAppIds]
+  );
   const pinnedDockApps = useMemo(() => {
-    const apps = [...defaultDockApps, ...userPinnedDockApps];
-    const seen = new Set<string>();
-    return apps.filter((app) => {
-      const key = `${app.name.toLowerCase()}|${app.executablePath.toLowerCase()}`;
-      if (seen.has(key)) {
-        return false;
-      }
-      seen.add(key);
-      return true;
+    return uniqueDockApps([...visibleDefaultDockApps, ...userPinnedDockApps]);
+  }, [userPinnedDockApps, visibleDefaultDockApps]);
+  const dockApps = useMemo(() => {
+    const pinnedKeys = new Set(pinnedDockApps.map(getDockAppIdentityKey));
+    const remainingApps = uniqueDockApps([...localDockApps, ...defaultDockApps])
+      .filter((dockApp) => !pinnedKeys.has(getDockAppIdentityKey(dockApp)))
+      .sort(compareDockAppsByName);
+
+    return [...pinnedDockApps, ...remainingApps];
+  }, [localDockApps, pinnedDockApps]);
+  const quickLaunchPreviewSources = useMemo(() => {
+    return quickLaunches.flatMap((quickLaunch) => {
+      const sourceByHwnd = quickLaunch.sourceHwnd
+        ? windows.find(
+            (windowInfo) =>
+              windowInfo.hwnd.toLowerCase() === quickLaunch.sourceHwnd!.toLowerCase() &&
+              !windowInfo.isInternal
+          )
+        : undefined;
+      const sourceByTitle = quickLaunch.sourceTitle
+        ? windows.find(
+            (windowInfo) =>
+              windowInfo.title === quickLaunch.sourceTitle &&
+              processMatchesDockApp(windowInfo, quickLaunch.app) &&
+              !windowInfo.isInternal
+          )
+        : undefined;
+      const sourceByApp = windows.find(
+        (windowInfo) => processMatchesDockApp(windowInfo, quickLaunch.app) && !windowInfo.isInternal
+      );
+      const source = sourceByHwnd || sourceByTitle || sourceByApp;
+      return source?.hwnd ? [{ id: quickLaunch.id, hwnd: source.hwnd }] : [];
     });
-  }, [userPinnedDockApps]);
+  }, [quickLaunches, windows]);
+  const quickLaunchPreviewSourceIds = useMemo(
+    () => new Set(quickLaunchPreviewSources.map((source) => source.id)),
+    [quickLaunchPreviewSources]
+  );
   const runningDockWindows = useMemo(() => {
     const canvasWindowsByHwnd = new Map(
       virtualWindows
@@ -299,16 +354,26 @@ function App(): React.JSX.Element {
   async function loadDockApps(): Promise<void> {
     setIsLoadingDockApps(true);
     try {
-      const [loaded, pinned] = await Promise.all([
+      const [loaded, pinned, unpinnedDefaultIds] = await Promise.all([
         window.infiniteDesk.listDockApps(),
-        window.infiniteDesk.listPinnedDockApps()
+        window.infiniteDesk.listPinnedDockApps(),
+        window.infiniteDesk.listUnpinnedDefaultDockApps()
       ]);
       setLocalDockApps(loaded);
       setUserPinnedDockApps(pinned);
+      setUnpinnedDefaultDockAppIds(unpinnedDefaultIds);
     } catch (dockError) {
       setError(`Could not load local apps: ${(dockError as Error).message}`);
     } finally {
       setIsLoadingDockApps(false);
+    }
+  }
+
+  async function loadQuickLaunches(): Promise<void> {
+    try {
+      setQuickLaunches(await window.infiniteDesk.listQuickLaunches());
+    } catch (quickLaunchError) {
+      setError(`Could not load Quick Launches: ${(quickLaunchError as Error).message}`);
     }
   }
 
@@ -320,6 +385,13 @@ function App(): React.JSX.Element {
 
     setError(null);
     try {
+      if (defaultDockAppIdSet.has(dockApp.id)) {
+        const unpinnedDefaultIds = await window.infiniteDesk.pinDefaultDockApp(dockApp.id);
+        setUnpinnedDefaultDockAppIds(unpinnedDefaultIds);
+        setMessage(`Pinned ${dockApp.name} to the Dock.`);
+        return;
+      }
+
       const pinned = await window.infiniteDesk.pinDockApp(dockApp);
       setUserPinnedDockApps(pinned);
       setMessage(`Pinned ${dockApp.name} to the Dock.`);
@@ -329,18 +401,74 @@ function App(): React.JSX.Element {
   }
 
   async function unpinDockApp(dockApp: DockApp): Promise<void> {
-    if (defaultDockApps.some((defaultApp) => defaultApp.id === dockApp.id)) {
-      setMessage(`${dockApp.name} is a default Dock app.`);
-      return;
-    }
-
     setError(null);
     try {
+      if (defaultDockAppIdSet.has(dockApp.id)) {
+        const unpinnedDefaultIds = await window.infiniteDesk.unpinDefaultDockApp(dockApp.id);
+        setUnpinnedDefaultDockAppIds(unpinnedDefaultIds);
+        setMessage(`Removed ${dockApp.name} from the Dock.`);
+        return;
+      }
+
       const pinned = await window.infiniteDesk.unpinDockApp(dockApp.id);
       setUserPinnedDockApps(pinned);
       setMessage(`Removed ${dockApp.name} from the Dock.`);
     } catch (unpinError) {
       setError((unpinError as Error).message);
+    }
+  }
+
+  async function pinWindowToQuickLaunch(windowInfo: VirtualWindowState): Promise<void> {
+    const detectedWindow = virtualWindowToDetected(windowInfo);
+    const matchingApp = dockApps.find((dockApp) => processMatchesDockApp(detectedWindow, dockApp));
+    if (!matchingApp) {
+      setError(`${windowInfo.processName} cannot be pinned to Quick Launch because its app target was not found.`);
+      return;
+    }
+
+    setError(null);
+    try {
+      const nextQuickLaunches = await window.infiniteDesk.createQuickLaunch({
+        name: matchingApp.name,
+        app: matchingApp,
+        x: windowInfo.virtualX,
+        y: windowInfo.virtualY,
+        sourceHwnd: windowInfo.hwnd,
+        sourceTitle: windowInfo.title,
+        processName: windowInfo.processName
+      });
+      setQuickLaunches(nextQuickLaunches);
+      setMessage(`Pinned ${matchingApp.name} to Quick Launch.`);
+    } catch (quickLaunchError) {
+      setError((quickLaunchError as Error).message);
+    }
+  }
+
+  async function deleteQuickLaunch(quickLaunch: QuickLaunch): Promise<void> {
+    setError(null);
+    try {
+      setQuickLaunches(await window.infiniteDesk.deleteQuickLaunch(quickLaunch.id));
+      setMessage(`Removed ${quickLaunch.name} from Quick Launch.`);
+    } catch (quickLaunchError) {
+      setError((quickLaunchError as Error).message);
+    }
+  }
+
+  function launchQuickLaunch(quickLaunch: QuickLaunch): void {
+    void launchDockApp(quickLaunch.app, { x: quickLaunch.x, y: quickLaunch.y });
+  }
+
+  function bumpQuickLaunchPreviewFrame(): void {
+    setQuickLaunchPreviewFrameVersion((value) => value + 1);
+  }
+
+  function updateQuickLaunchPanelLayout(layout: QuickLaunchPanelLayout): void {
+    setQuickLaunchPanelLayout(layout);
+    bumpQuickLaunchPreviewFrame();
+    try {
+      window.localStorage.setItem(QUICK_LAUNCH_PANEL_LAYOUT_STORAGE_KEY, JSON.stringify(layout));
+    } catch {
+      // Layout persistence is best-effort; the panel still works without it.
     }
   }
 
@@ -429,7 +557,7 @@ function App(): React.JSX.Element {
     setActivityWindowHwnds((current) => current.filter((candidate) => candidate !== normalizedHwnd));
   }
 
-  async function scanAfterLaunch(dockApp: DockApp): Promise<void> {
+  async function scanAfterLaunch(dockApp: DockApp, placementPoint?: LaunchPlacementPoint): Promise<void> {
     const startedAt = Date.now();
     const hwndsAtLaunch = new Set(
       virtualWindowsRef.current.flatMap((windowInfo) => (windowInfo.hwnd ? [windowInfo.hwnd.toLowerCase()] : []))
@@ -441,7 +569,7 @@ function App(): React.JSX.Element {
         await new Promise((resolve) => window.setTimeout(resolve, remainingDelay));
       }
 
-      await scanForNewWindows('', dockApp);
+      await scanForNewWindows('', dockApp, placementPoint);
       const matchingNewWindow = virtualWindowsRef.current.find(
         (windowInfo) =>
           processMatchesDockApp(virtualWindowToDetected(windowInfo), dockApp) &&
@@ -469,7 +597,7 @@ function App(): React.JSX.Element {
     setMessage(`Launched ${dockApp.name}, but its window is still starting.`);
   }
 
-  async function launchDockApp(dockApp: DockApp): Promise<void> {
+  async function launchDockApp(dockApp: DockApp, placementPoint?: LaunchPlacementPoint): Promise<void> {
     setLaunchingAppId(dockApp.id);
     setError(null);
     try {
@@ -480,7 +608,7 @@ function App(): React.JSX.Element {
       }
 
       setMessage(`Launching ${dockApp.name}...`);
-      await scanAfterLaunch(dockApp);
+      await scanAfterLaunch(dockApp, placementPoint);
     } catch (launchError) {
       setError((launchError as Error).message);
     } finally {
@@ -510,7 +638,7 @@ function App(): React.JSX.Element {
     setIsBrandMenuOpen(false);
   }
 
-  async function scanForNewWindows(sourceHwnd: string, preferredDockApp?: DockApp): Promise<number> {
+  async function scanForNewWindows(sourceHwnd: string, preferredDockApp?: DockApp, placementPoint?: LaunchPlacementPoint): Promise<number> {
     if (autoScanInFlightRef.current) {
       return 0;
     }
@@ -545,10 +673,13 @@ function App(): React.JSX.Element {
 
       if (metadataRefresh.changedHwnds.length > 0) {
         const refreshedInitial = refreshVirtualWindowMetadata(initialVirtualWindowsRef.current, detected).windows;
+        const refreshedRegions = updateRegionMembership(refreshedWindows, regionsRef.current);
         virtualWindowsRef.current = refreshedWindows;
         initialVirtualWindowsRef.current = refreshedInitial;
+        regionsRef.current = refreshedRegions;
         setCanvasWindows(refreshedWindows);
         setInitialVirtualWindows(refreshedInitial);
+        setCanvasRegions(refreshedRegions);
         setWindows(detected);
       }
       if (newDetectedWindows.length === 0) {
@@ -562,7 +693,9 @@ function App(): React.JSX.Element {
       }
 
       setWindows(detected);
-      const placedWindows = placeDetectedWindowsNearSource(newDetectedWindows, refreshedWindows, sourceHwnd);
+      const placedWindows = placementPoint
+        ? placeDetectedWindowsAtPoint(newDetectedWindows, placementPoint)
+        : placeDetectedWindowsNearSource(newDetectedWindows, refreshedWindows, sourceHwnd);
       const nextWindows = [...refreshedWindows, ...placedWindows];
       const nextInitialWindows = [
         ...refreshVirtualWindowMetadata(initialVirtualWindowsRef.current, detected).windows,
@@ -739,6 +872,7 @@ function App(): React.JSX.Element {
   useEffect(() => {
     void loadWorkspaces();
     void loadDockApps();
+    void loadQuickLaunches();
     void scanWindows();
   }, []);
 
@@ -912,6 +1046,11 @@ function App(): React.JSX.Element {
           onClearDwmPreviews={() => void clearDwmPreviews()}
           onRelayPointerInput={(input) => void relayPointerInput(input)}
           onScanWindows={() => void scanWindows()}
+          canvasLaunchApps={pinnedDockApps}
+          onLaunchAppAt={(dockApp, point) => void launchDockApp(dockApp, point)}
+          onPinWindowToQuickLaunch={(windowInfo) => void pinWindowToQuickLaunch(windowInfo)}
+          fixedPreviewSources={quickLaunchPreviewSources}
+          fixedPreviewFrameVersion={quickLaunchPreviewFrameVersion}
           onCanvasBackgroundPointerDown={() => setCloseDockSignal((value) => value + 1)}
           onApplyWindows={(targetWindows) => void applyWindows(targetWindows)}
           fitSignal={fitSignal}
@@ -923,6 +1062,17 @@ function App(): React.JSX.Element {
           activityWindowHwnds={activityWindowHwnds}
           onAcknowledgeWindowActivity={acknowledgeWindowActivity}
           onZoomChange={setZoomScale}
+        />
+
+        <QuickLaunchPanel
+          quickLaunches={quickLaunches}
+          launchingAppId={launchingAppId}
+          previewSourceIds={quickLaunchPreviewSourceIds}
+          layout={quickLaunchPanelLayout}
+          onLayoutChange={updateQuickLaunchPanelLayout}
+          onPreviewFrameChange={bumpQuickLaunchPreviewFrame}
+          onLaunch={launchQuickLaunch}
+          onDelete={(quickLaunch) => void deleteQuickLaunch(quickLaunch)}
         />
 
         <aside data-dwm-ui-overlay={isDrawerOpen ? 'true' : undefined} className={`floating-drawer immersive-drawer ${isDrawerOpen ? 'open' : ''}`}>
@@ -960,7 +1110,6 @@ function App(): React.JSX.Element {
         <Dock
           apps={dockApps}
           pinnedApps={pinnedDockApps}
-          defaultPinnedAppIds={defaultDockApps.map((dockApp) => dockApp.id)}
           runningWindows={runningDockWindows}
           selectedWindowKeys={selectedWindowKeys}
           activityWindowHwnds={activityWindowHwnds}

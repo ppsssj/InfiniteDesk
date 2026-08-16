@@ -74,6 +74,29 @@ export type LaunchResult = {
   error?: string;
 };
 
+export type QuickLaunch = {
+  id: string;
+  name: string;
+  app: DockApp;
+  x: number;
+  y: number;
+  sourceHwnd?: string;
+  sourceTitle?: string;
+  processName?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateQuickLaunchInput = {
+  name: string;
+  app: DockApp;
+  x: number;
+  y: number;
+  sourceHwnd?: string;
+  sourceTitle?: string;
+  processName?: string;
+};
+
 export type FocusWindowResult = {
   success: boolean;
   hwnd: string;

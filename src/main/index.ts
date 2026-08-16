@@ -3,6 +3,7 @@ import type {
   ApplyLayoutInput,
   CreateTemplateInput,
   CreateWorkspaceInput,
+  CreateQuickLaunchInput,
   DetectedWindow,
   DockApp,
   DwmPreviewResult,
@@ -14,6 +15,7 @@ import type {
   LayoutTemplate,
   MoveEmbeddedWindowParams,
   OverlayModeResult,
+  QuickLaunch,
   RelayPointerInput,
   RelayPointerResult,
   RestoreResult,
@@ -22,7 +24,16 @@ import type {
   WindowCommandResult,
   WorkspaceRegion
 } from '../shared/types';
-import { readTemplates, writeTemplates, readWorkspaces, writeWorkspaces, readPinnedDockApps, writePinnedDockApps } from './storage';
+import {
+  readTemplates,
+  writeTemplates,
+  readWorkspaces,
+  writeWorkspaces,
+  readPinnedDockApps,
+  writePinnedDockApps,
+  readUnpinnedDefaultDockAppIds,
+  writeUnpinnedDefaultDockAppIds
+} from './storage';
 import { listLocalDockApps, launchDockApp, registerLaunchableDockApps } from './dock-apps';
 import { sendWindowControlCommand, stopWindowControlHost } from './window-control-client';
 import { sendDwmPreviewCommand, stopDwmPreviewHost, recordDwmPreviewSync } from './dwm-preview-client';
@@ -41,6 +52,7 @@ import { handleTrusted } from './security';
 
 let overlayRestoreBounds: Rectangle | null = null;
 let isQuittingAfterDetach = false;
+let sessionQuickLaunches: QuickLaunch[] = [];
 
 app.disableHardwareAcceleration();
 app.enableSandbox();
@@ -444,6 +456,10 @@ handleTrusted('dock:list-pinned-apps', async (): Promise<DockApp[]> => {
   return apps;
 });
 
+handleTrusted('dock:list-unpinned-default-apps', async (): Promise<string[]> => {
+  return readUnpinnedDefaultDockAppIds();
+});
+
 handleTrusted('dock:pin-app', async (_event, app: DockApp): Promise<DockApp[]> => {
   if (!app.id || !app.name || !app.executablePath) {
     throw new Error('Cannot pin an app without a trusted launch target.');
@@ -464,6 +480,17 @@ handleTrusted('dock:pin-app', async (_event, app: DockApp): Promise<DockApp[]> =
   return nextPinnedApps;
 });
 
+handleTrusted('dock:pin-default-app', async (_event, appId: string): Promise<string[]> => {
+  const normalizedAppId = appId.trim();
+  if (!normalizedAppId) {
+    return readUnpinnedDefaultDockAppIds();
+  }
+
+  const nextUnpinned = (await readUnpinnedDefaultDockAppIds()).filter((candidate) => candidate !== normalizedAppId);
+  await writeUnpinnedDefaultDockAppIds(nextUnpinned);
+  return nextUnpinned;
+});
+
 handleTrusted('dock:unpin-app', async (_event, appId: string): Promise<DockApp[]> => {
   const pinnedApps = await readPinnedDockApps();
   const nextPinnedApps = pinnedApps.filter((dockApp) => dockApp.id !== appId);
@@ -472,8 +499,60 @@ handleTrusted('dock:unpin-app', async (_event, appId: string): Promise<DockApp[]
   return nextPinnedApps;
 });
 
+handleTrusted('dock:unpin-default-app', async (_event, appId: string): Promise<string[]> => {
+  const normalizedAppId = appId.trim();
+  if (!normalizedAppId) {
+    return readUnpinnedDefaultDockAppIds();
+  }
+
+  const currentUnpinned = await readUnpinnedDefaultDockAppIds();
+  const nextUnpinned = Array.from(new Set([...currentUnpinned, normalizedAppId]));
+  await writeUnpinnedDefaultDockAppIds(nextUnpinned);
+  return nextUnpinned;
+});
+
 handleTrusted('dock:launch-app', async (_event, appId: string): Promise<LaunchResult> => {
   return launchDockApp(appId);
+});
+
+handleTrusted('quick-launches:list', async (): Promise<QuickLaunch[]> => {
+  registerLaunchableDockApps(sessionQuickLaunches.map((quickLaunch) => quickLaunch.app));
+  return sessionQuickLaunches;
+});
+
+handleTrusted('quick-launches:create', async (_event, input: CreateQuickLaunchInput): Promise<QuickLaunch[]> => {
+  if (!input.app?.id || !input.app.name || !input.app.executablePath) {
+    throw new Error('Cannot create a Quick Launch without a trusted app target.');
+  }
+
+  const now = new Date().toISOString();
+  const quickLaunch: QuickLaunch = {
+    id: crypto.randomUUID(),
+    name: input.name.trim() || input.app.name,
+    app: {
+      ...input.app,
+      isPinned: input.app.isPinned ?? false
+    },
+    x: Math.round(input.x),
+    y: Math.round(input.y),
+    sourceHwnd: input.sourceHwnd,
+    sourceTitle: input.sourceTitle,
+    processName: input.processName,
+    createdAt: now,
+    updatedAt: now
+  };
+  sessionQuickLaunches = [
+    quickLaunch,
+    ...sessionQuickLaunches.filter((candidate) => candidate.app.id !== input.app.id)
+  ];
+  registerLaunchableDockApps(sessionQuickLaunches.map((item) => item.app));
+  return sessionQuickLaunches;
+});
+
+handleTrusted('quick-launches:delete', async (_event, id: string): Promise<QuickLaunch[]> => {
+  sessionQuickLaunches = sessionQuickLaunches.filter((quickLaunch) => quickLaunch.id !== id);
+  registerLaunchableDockApps(sessionQuickLaunches.map((quickLaunch) => quickLaunch.app));
+  return sessionQuickLaunches;
 });
 
 app.whenReady().then(() => {

@@ -44,6 +44,11 @@ export function CanvasPreview({
   onClearDwmPreviews,
   onRelayPointerInput,
   onScanWindows,
+  canvasLaunchApps,
+  onLaunchAppAt,
+  onPinWindowToQuickLaunch,
+  fixedPreviewSources,
+  fixedPreviewFrameVersion,
   onCanvasBackgroundPointerDown,
   onApplyWindows,
   fitSignal,
@@ -72,13 +77,30 @@ export function CanvasPreview({
     () => new Set(activityWindowHwnds.map((hwnd) => hwnd.toLowerCase())),
     [activityWindowHwnds]
   );
+  const fixedPreviewSourceHwndSet = useMemo(
+    () => new Set(fixedPreviewSources.map((source) => source.hwnd.toLowerCase())),
+    [fixedPreviewSources]
+  );
+  const canvasWindowEntries = useMemo(
+    () =>
+      windows.flatMap((windowInfo, index) =>
+        windowInfo.hwnd && fixedPreviewSourceHwndSet.has(windowInfo.hwnd.toLowerCase())
+          ? []
+          : [{ windowInfo, index }]
+      ),
+    [fixedPreviewSourceHwndSet, windows]
+  );
+  const canvasWindows = useMemo(
+    () => canvasWindowEntries.map((entry) => entry.windowInfo),
+    [canvasWindowEntries]
+  );
   const shouldSuspendNativePreviews = false;
 
   const viewportVersion = useViewportVersion(canvasRef);
 
   const { transform, setTransform, fitView, getDefaultTransform } = useCanvasTransform({
     canvasRef,
-    windows,
+    windows: canvasWindows,
     safeArea,
     fitSignal,
     resetViewSignal,
@@ -126,9 +148,12 @@ export function CanvasPreview({
 
   useEffect(() => {
     windowsRef.current = windows;
-    const visibleKeys = new Set(windows.map((windowInfo, index) => getWindowKey(windowInfo, index)));
-    onSelectWindowKeys(selectedWindowKeys.filter((key) => visibleKeys.has(key)));
-  }, [windows]);
+    const visibleKeys = new Set(canvasWindowEntries.map(({ windowInfo, index }) => getWindowKey(windowInfo, index)));
+    const nextSelectedWindowKeys = selectedWindowKeys.filter((key) => visibleKeys.has(key));
+    if (nextSelectedWindowKeys.length !== selectedWindowKeys.length) {
+      onSelectWindowKeys(nextSelectedWindowKeys);
+    }
+  }, [canvasWindowEntries, selectedWindowKeys, windows]);
 
   useEffect(() => {
     regionsRef.current = regions;
@@ -213,6 +238,42 @@ export function CanvasPreview({
     }));
   }
 
+  function getFixedDwmPreviewWindows(): DwmPreviewWindow[] {
+    const sourceById = new Map(fixedPreviewSources.map((source) => [source.id, source.hwnd]));
+    if (sourceById.size === 0) {
+      return [];
+    }
+
+    return Array.from(document.querySelectorAll<HTMLElement>('[data-dwm-preview-id]')).flatMap((element) => {
+      const id = element.dataset.dwmPreviewId;
+      const hwnd = id ? sourceById.get(id) : undefined;
+      if (!id || !hwnd) {
+        return [];
+      }
+
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0 || rect.width <= 20 || rect.height <= 20) {
+        return [];
+      }
+
+      return [{
+        id: `fixed:${id}`,
+        hwnd,
+        x: Math.round(rect.left),
+        y: Math.round(rect.top),
+        width: Math.max(1, Math.round(rect.width)),
+        height: Math.max(1, Math.round(rect.height)),
+        cropX: 0,
+        cropY: 0,
+        cropWidth: 1,
+        cropHeight: 1,
+        visible: true,
+        opacity: 255
+      }];
+    });
+  }
+
   useEffect(() => {
     const animationFrameId = window.requestAnimationFrame(() => {
       if (shouldSuspendNativePreviews) {
@@ -220,12 +281,19 @@ export function CanvasPreview({
         return;
       }
 
-      const previews = windows.flatMap((windowInfo) => getDwmPreviewWindows(windowInfo));
+      const previews = [
+        ...windows.flatMap((windowInfo) => (
+          windowInfo.hwnd && fixedPreviewSourceHwndSet.has(windowInfo.hwnd.toLowerCase())
+            ? []
+            : getDwmPreviewWindows(windowInfo)
+        )),
+        ...getFixedDwmPreviewWindows()
+      ];
       onSyncDwmPreviews(previews);
     });
 
     return () => window.cancelAnimationFrame(animationFrameId);
-  }, [contextMenu, embeddedWindowIdSet, selectedRegionId, shouldSuspendNativePreviews, transform, uiOverlayActive, viewportVersion, windows]);
+  }, [contextMenu, embeddedWindowIdSet, fixedPreviewFrameVersion, fixedPreviewSourceHwndSet, fixedPreviewSources, selectedRegionId, shouldSuspendNativePreviews, transform, uiOverlayActive, viewportVersion, windows]);
 
   useEffect(() => {
     return () => {
@@ -253,7 +321,9 @@ export function CanvasPreview({
       const selectedKeys = new Set(selectedWindowKeys);
       return windowsRef.current.flatMap((windowInfo, index) => {
         const key = getWindowKey(windowInfo, index);
-        return selectedKeys.has(key) ? [{ key, windowInfo }] : [];
+        return selectedKeys.has(key) && !(windowInfo.hwnd && fixedPreviewSourceHwndSet.has(windowInfo.hwnd.toLowerCase()))
+          ? [{ key, windowInfo }]
+          : [];
       });
     }
 
@@ -327,7 +397,13 @@ export function CanvasPreview({
 
       if (isPrimaryShortcut(event) && event.key.toLowerCase() === 'a') {
         event.preventDefault();
-        onSelectWindowKeys(windowsRef.current.map((windowInfo, index) => getWindowKey(windowInfo, index)));
+        onSelectWindowKeys(
+          windowsRef.current.flatMap((windowInfo, index) =>
+            windowInfo.hwnd && fixedPreviewSourceHwndSet.has(windowInfo.hwnd.toLowerCase())
+              ? []
+              : [getWindowKey(windowInfo, index)]
+          )
+        );
         setContextMenu(null);
         return;
       }
@@ -567,7 +643,11 @@ export function CanvasPreview({
 
     if (drag?.type === 'select-windows' && selectionRect) {
       const nextSelectedKeys = windowsRef.current.flatMap((windowInfo, index) =>
-        windowIntersectsSelection(windowInfo, selectionRect) ? [getWindowKey(windowInfo, index)] : []
+        windowInfo.hwnd && fixedPreviewSourceHwndSet.has(windowInfo.hwnd.toLowerCase())
+          ? []
+          : windowIntersectsSelection(windowInfo, selectionRect)
+            ? [getWindowKey(windowInfo, index)]
+            : []
       );
       onSelectWindowKeys(nextSelectedKeys);
     } else if (drag?.type === 'window') {
@@ -752,7 +832,7 @@ export function CanvasPreview({
 
   const contextWindow =
     contextMenu?.type === 'window'
-      ? windows.find((windowInfo, index) => getWindowKey(windowInfo, index) === contextMenu.key)
+      ? canvasWindowEntries.find(({ windowInfo, index }) => getWindowKey(windowInfo, index) === contextMenu.key)?.windowInfo
       : null;
   const selectedWindowKeySet = new Set(selectedWindowKeys);
 
@@ -768,13 +848,13 @@ export function CanvasPreview({
         onWheel={handleWheel}
         onContextMenu={handleCanvasContextMenu}
       >
-        {windows.length === 0 ? (
+        {canvasWindowEntries.length === 0 ? (
           <div className="canvas-empty">
             <strong>Scan Windows to start.</strong>
             <span>Drag windows to arrange them. Ctrl+Drag selects multiple windows.</span>
           </div>
         ) : (
-          windows.map((windowInfo, index) => {
+          canvasWindowEntries.map(({ windowInfo, index }) => {
             const key = getWindowKey(windowInfo, index);
             const frame = getFrameScreenBounds(windowInfo);
             const isEmbedded = isEmbeddedWindow(windowInfo);
@@ -903,15 +983,16 @@ export function CanvasPreview({
           <CanvasContextMenu
             contextMenu={contextMenu}
             contextWindow={contextWindow ?? null}
+            canvasLaunchApps={canvasLaunchApps}
             onClose={() => setContextMenu(null)}
             onScanWindows={onScanWindows}
             onFitView={fitView}
             onResetView={() => setTransform(getDefaultTransform())}
+            onLaunchAppAt={onLaunchAppAt}
             onZoomToWindow={zoomToWindowNode}
             onWorkInWindow={workInWindow}
-            onRunWindowCommand={runWindowCommand}
-            onApplyWindow={(windowInfo) => onApplyWindows([windowInfo])}
-            onResetWindowPosition={resetWindowPosition}
+            onPinToQuickLaunch={onPinWindowToQuickLaunch}
+            onCloseWindow={(windowInfo) => runWindowCommand(windowInfo, 'close')}
             onRemoveWindowFromCanvas={removeWindowFromCanvas}
           />
         ) : null}

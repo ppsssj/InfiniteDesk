@@ -1,6 +1,6 @@
 import type { CanvasSafeArea } from '../canvas/transform';
 import type { TemplateRegion, VirtualWindowState } from '../canvas/types';
-import type { DwmPreviewWindow, MoveEmbeddedWindowParams, RelayPointerInput, WindowCommand } from '../../shared/types';
+import type { DockApp, DwmPreviewWindow, MoveEmbeddedWindowParams, RelayPointerInput, WindowCommand } from '../../shared/types';
 
 export type CanvasPreviewProps = {
   windows: VirtualWindowState[];
@@ -24,6 +24,11 @@ export type CanvasPreviewProps = {
   onClearDwmPreviews: () => void;
   onRelayPointerInput: (input: RelayPointerInput) => void;
   onScanWindows: () => void;
+  canvasLaunchApps: DockApp[];
+  onLaunchAppAt: (app: DockApp, point: { x: number; y: number }) => void;
+  onPinWindowToQuickLaunch: (windowInfo: VirtualWindowState) => void;
+  fixedPreviewSources: Array<{ id: string; hwnd: string }>;
+  fixedPreviewFrameVersion: number;
   onCanvasBackgroundPointerDown: () => void;
   onApplyWindows: (windows: VirtualWindowState[]) => void;
   fitSignal: number;

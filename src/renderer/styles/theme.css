@@ -121,6 +121,10 @@
   background: var(--control-hover);
 }
 
+.context-menu-separator {
+  background: var(--line);
+}
+
 .floating-view-controls {
   min-height: 40px;
   border-radius: 999px;

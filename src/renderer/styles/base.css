@@ -947,11 +947,13 @@ button:disabled {
   background: rgba(255, 255, 255, 0.1);
 }
 
-.brand-menu .danger-menu-action {
+.brand-menu .danger-menu-action,
+.context-menu .danger-menu-action {
   color: #fecaca;
 }
 
-.brand-menu .danger-menu-action:hover {
+.brand-menu .danger-menu-action:hover,
+.context-menu .danger-menu-action:hover {
   background: rgba(127, 29, 29, 0.42);
 }
 
@@ -1003,6 +1005,12 @@ button:disabled {
   min-width: 190px;
   border-radius: 10px;
   padding: 6px;
+}
+
+.context-menu-separator {
+  height: 1px;
+  margin: 5px 6px;
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .shortcut-list {

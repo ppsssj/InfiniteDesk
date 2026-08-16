@@ -15,6 +15,10 @@ function getPinnedDockAppsStoragePath(): string {
   return join(app.getPath('userData'), 'pinned-dock-apps.json');
 }
 
+function getUnpinnedDefaultDockAppsStoragePath(): string {
+  return join(app.getPath('userData'), 'unpinned-default-dock-apps.json');
+}
+
 export async function readTemplates(): Promise<LayoutTemplate[]> {
   return readRecoverableJsonArray<LayoutTemplate>(getTemplatesStoragePath());
 }
@@ -37,4 +41,12 @@ export async function readPinnedDockApps(): Promise<DockApp[]> {
 
 export async function writePinnedDockApps(apps: DockApp[]): Promise<void> {
   await writeRecoverableJsonArray(getPinnedDockAppsStoragePath(), apps);
+}
+
+export async function readUnpinnedDefaultDockAppIds(): Promise<string[]> {
+  return readRecoverableJsonArray<string>(getUnpinnedDefaultDockAppsStoragePath());
+}
+
+export async function writeUnpinnedDefaultDockAppIds(appIds: string[]): Promise<void> {
+  await writeRecoverableJsonArray(getUnpinnedDefaultDockAppsStoragePath(), appIds);
 }
