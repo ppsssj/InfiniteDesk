@@ -46,6 +46,9 @@ public class WinApi {
   public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
 
   [DllImport("user32.dll")]
+  public static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT placement);
+
+  [DllImport("user32.dll")]
   public static extern int GetSystemMetrics(int nIndex);
 
   [DllImport("dwmapi.dll")]
@@ -126,6 +129,16 @@ public class WinApi {
     public int X;
     public int Y;
   }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct WINDOWPLACEMENT {
+    public int length;
+    public int flags;
+    public int showCmd;
+    public POINT ptMinPosition;
+    public POINT ptMaxPosition;
+    public RECT rcNormalPosition;
+  }
 }
 "@
 
@@ -171,6 +184,25 @@ function Get-VisibleWindowRect {
   }
 
   return $null
+}
+
+function Get-RestoreWindowRect {
+  param([IntPtr]$Handle)
+
+  $placement = New-Object WinApi+WINDOWPLACEMENT
+  $placement.length = [System.Runtime.InteropServices.Marshal]::SizeOf([type][WinApi+WINDOWPLACEMENT])
+  if (-not [WinApi]::GetWindowPlacement($Handle, [ref]$placement)) {
+    return $null
+  }
+
+  $rect = $placement.rcNormalPosition
+  $width = $rect.Right - $rect.Left
+  $height = $rect.Bottom - $rect.Top
+  if ($width -le 0 -or $height -le 0) {
+    return $null
+  }
+
+  return $rect
 }
 
 function Get-VirtualScreenRect {
@@ -279,7 +311,11 @@ function Get-OpenWindows {
       return $true
     }
 
-    $rect = Get-VisibleWindowRect $hWnd
+    $isMinimized = [WinApi]::IsIconic($hWnd)
+    $rect = if ($isMinimized) { Get-RestoreWindowRect $hWnd } else { Get-VisibleWindowRect $hWnd }
+    if ($null -eq $rect) {
+      $rect = Get-VisibleWindowRect $hWnd
+    }
     if ($null -eq $rect) {
       return $true
     }
@@ -296,7 +332,6 @@ function Get-OpenWindows {
       return $true
     }
 
-    $isMinimized = [WinApi]::IsIconic($hWnd)
     $rawX = $rect.Left
     $rawY = $rect.Top
     $width = $rect.Right - $rect.Left

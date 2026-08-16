@@ -136,10 +136,21 @@ export function refreshVirtualWindowMetadata(
       return windowInfo;
     }
 
+    const detectedHasUsableBounds = hasUsableWindowBounds(detected);
+    const nextRealX = detectedHasUsableBounds ? detected.x : windowInfo.realX;
+    const nextRealY = detectedHasUsableBounds ? detected.y : windowInfo.realY;
+    const nextWidth = detectedHasUsableBounds ? detected.width : windowInfo.width;
+    const nextHeight = detectedHasUsableBounds ? detected.height : windowInfo.height;
+    const nextIsHelper = detected.isIgnored ?? windowInfo.isHelper;
     const hasActivity =
       detected.title !== windowInfo.title ||
       detected.processName !== windowInfo.processName ||
-      detected.statusReason !== windowInfo.statusReason;
+      detected.statusReason !== windowInfo.statusReason ||
+      nextRealX !== windowInfo.realX ||
+      nextRealY !== windowInfo.realY ||
+      nextWidth !== windowInfo.width ||
+      nextHeight !== windowInfo.height ||
+      nextIsHelper !== windowInfo.isHelper;
     if (hasActivity) {
       changedHwnds.push(windowInfo.hwnd);
     }
@@ -147,7 +158,12 @@ export function refreshVirtualWindowMetadata(
       ...windowInfo,
       title: detected.title,
       processName: detected.processName,
-      statusReason: detected.statusReason
+      realX: nextRealX,
+      realY: nextRealY,
+      width: nextWidth,
+      height: nextHeight,
+      statusReason: detected.statusReason,
+      isHelper: nextIsHelper
     };
   });
 

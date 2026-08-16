@@ -103,6 +103,42 @@ describe('refreshVirtualWindowMetadata', () => {
     expect(result.windows[0]).toMatchObject({ title: 'New title', virtualX: 900, virtualY: 700 });
   });
 
+  it('updates real bounds and panel size without moving the virtual placement', () => {
+    const current = toVirtualWindows([makeDetected({ hwnd: '0xA', x: 10, y: 20, width: 300, height: 200 })]);
+    current[0].virtualX = 900;
+    current[0].virtualY = 700;
+
+    const result = refreshVirtualWindowMetadata(current, [
+      makeDetected({ hwnd: '0xa', x: 0, y: 0, width: 1366, height: 728, isMinimized: false })
+    ]);
+
+    expect(result.changedHwnds).toEqual(['0xA']);
+    expect(result.windows[0]).toMatchObject({
+      realX: 0,
+      realY: 0,
+      virtualX: 900,
+      virtualY: 700,
+      width: 1366,
+      height: 728
+    });
+  });
+
+  it('keeps the previous panel size when detected bounds are not usable', () => {
+    const current = toVirtualWindows([makeDetected({ hwnd: '0xA', x: 10, y: 20, width: 300, height: 200 })]);
+
+    const result = refreshVirtualWindowMetadata(current, [
+      makeDetected({ hwnd: '0xa', x: null, y: null, width: null, height: null, isRestorable: false, statusReason: 'Offscreen / hidden' })
+    ]);
+
+    expect(result.windows[0]).toMatchObject({
+      realX: 10,
+      realY: 20,
+      width: 300,
+      height: 200,
+      statusReason: 'Offscreen / hidden'
+    });
+  });
+
   it('does not report unchanged known windows as activity', () => {
     const current = toVirtualWindows([makeDetected({ hwnd: '0xA', title: 'Same title' })]);
     const result = refreshVirtualWindowMetadata(current, [makeDetected({ hwnd: '0xa', title: 'Same title' })]);
