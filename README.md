@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ppsssj/InfiniteDesk/releases/download/v0.1.0/InfiniteDesk.Setup.0.1.0.exe"><strong>Windows용 InfiniteDesk 0.1.0 다운로드</strong></a>
+  <a href="https://github.com/ppsssj/InfiniteDesk/releases/download/v0.2.0/InfiniteDesk.Setup.0.2.0.exe"><strong>Windows용 InfiniteDesk 0.2.0 다운로드</strong></a>
 </p>
 
 InfiniteDesk는 실행 중인 Windows 앱 창을 하나의 캔버스에서 확인하고 배치한 뒤, 그 배치를 실제 데스크톱 창에 다시 적용하는 데스크톱 레이아웃 컨트롤러입니다.
@@ -20,7 +20,7 @@ InfiniteDesk는 실행 중인 Windows 앱 창을 하나의 캔버스에서 확�
 
 Windows 설치 파일은 GitHub Releases에서 받을 수 있습니다.
 
-- [InfiniteDesk 0.1.0 다운로드](https://github.com/ppsssj/InfiniteDesk/releases/download/v0.1.0/InfiniteDesk.Setup.0.1.0.exe)
+- [InfiniteDesk 0.2.0 다운로드](https://github.com/ppsssj/InfiniteDesk/releases/download/v0.2.0/InfiniteDesk.Setup.0.2.0.exe)
 - [전체 릴리스 보기](https://github.com/ppsssj/InfiniteDesk/releases)
 
 현재 설치 파일은 코드 서명이 되어 있지 않으므로 Windows SmartScreen 또는 보안 경고가 표시될 수 있습니다.
@@ -112,7 +112,7 @@ npm test
 npm run package:win
 ```
 
-생성된 설치 파일은 `release/InfiniteDesk Setup 0.1.0.exe`에 저장됩니다.
+생성된 설치 파일은 `release/InfiniteDesk Setup 0.2.0.exe`에 저장됩니다.
 
 ## 배포 상태
 

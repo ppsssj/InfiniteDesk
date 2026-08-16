@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ppsssj/InfiniteDesk/releases/download/v0.1.0/InfiniteDesk.Setup.0.1.0.exe"><strong>Download InfiniteDesk 0.1.0 for Windows</strong></a>
+  <a href="https://github.com/ppsssj/InfiniteDesk/releases/download/v0.2.0/InfiniteDesk.Setup.0.2.0.exe"><strong>Download InfiniteDesk 0.2.0 for Windows</strong></a>
 </p>
 
 InfiniteDesk is a desktop layout controller for Windows. It scans running app windows, shows them on a canvas, lets you arrange them, and applies that layout back to the real desktop.
@@ -20,7 +20,7 @@ It is designed for workflows where several apps are open at once and window plac
 
 Download the Windows installer from GitHub Releases.
 
-- [Download InfiniteDesk 0.1.0](https://github.com/ppsssj/InfiniteDesk/releases/download/v0.1.0/InfiniteDesk.Setup.0.1.0.exe)
+- [Download InfiniteDesk 0.2.0](https://github.com/ppsssj/InfiniteDesk/releases/download/v0.2.0/InfiniteDesk.Setup.0.2.0.exe)
 - [View all releases](https://github.com/ppsssj/InfiniteDesk/releases)
 
 The current installer is not code-signed, so Windows SmartScreen or security warnings may appear.
@@ -112,7 +112,7 @@ npm test
 npm run package:win
 ```
 
-The installer is generated at `release/InfiniteDesk Setup 0.1.0.exe`.
+The installer is generated at `release/InfiniteDesk Setup 0.2.0.exe`.
 
 ## Distribution
 
