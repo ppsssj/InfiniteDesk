@@ -22,8 +22,8 @@ import type {
   WindowCommandResult,
   WorkspaceRegion
 } from '../shared/types';
-import { readTemplates, writeTemplates, readWorkspaces, writeWorkspaces } from './storage';
-import { listLocalDockApps, launchDockApp } from './dock-apps';
+import { readTemplates, writeTemplates, readWorkspaces, writeWorkspaces, readPinnedDockApps, writePinnedDockApps } from './storage';
+import { listLocalDockApps, launchDockApp, registerLaunchableDockApps } from './dock-apps';
 import { sendWindowControlCommand, stopWindowControlHost } from './window-control-client';
 import { sendDwmPreviewCommand, stopDwmPreviewHost, recordDwmPreviewSync } from './dwm-preview-client';
 import {
@@ -436,6 +436,40 @@ handleTrusted('dwm:clear-previews', (): DwmPreviewResult => {
 
 handleTrusted('dock:list-apps', async (): Promise<DockApp[]> => {
   return listLocalDockApps();
+});
+
+handleTrusted('dock:list-pinned-apps', async (): Promise<DockApp[]> => {
+  const apps = await readPinnedDockApps();
+  registerLaunchableDockApps(apps);
+  return apps;
+});
+
+handleTrusted('dock:pin-app', async (_event, app: DockApp): Promise<DockApp[]> => {
+  if (!app.id || !app.name || !app.executablePath) {
+    throw new Error('Cannot pin an app without a trusted launch target.');
+  }
+
+  const pinnedApp: DockApp = {
+    ...app,
+    isPinned: true
+  };
+  const pinnedApps = await readPinnedDockApps();
+  const key = `${pinnedApp.name.toLowerCase()}|${pinnedApp.executablePath.toLowerCase()}`;
+  const nextPinnedApps = [
+    ...pinnedApps.filter((candidate) => `${candidate.name.toLowerCase()}|${candidate.executablePath.toLowerCase()}` !== key),
+    pinnedApp
+  ];
+  await writePinnedDockApps(nextPinnedApps);
+  registerLaunchableDockApps(nextPinnedApps);
+  return nextPinnedApps;
+});
+
+handleTrusted('dock:unpin-app', async (_event, appId: string): Promise<DockApp[]> => {
+  const pinnedApps = await readPinnedDockApps();
+  const nextPinnedApps = pinnedApps.filter((dockApp) => dockApp.id !== appId);
+  await writePinnedDockApps(nextPinnedApps);
+  registerLaunchableDockApps(nextPinnedApps);
+  return nextPinnedApps;
 });
 
 handleTrusted('dock:launch-app', async (_event, appId: string): Promise<LaunchResult> => {

@@ -271,6 +271,12 @@ export async function listLocalDockApps(): Promise<DockApp[]> {
   return appsWithIcons;
 }
 
+export function registerLaunchableDockApps(apps: DockApp[]): void {
+  for (const dockApp of apps) {
+    launchableDockApps.set(dockApp.id, dockApp);
+  }
+}
+
 export async function launchDockApp(appId: string): Promise<LaunchResult> {
   const dockApp = launchableDockApps.get(appId);
   if (!dockApp) {
