@@ -8,10 +8,13 @@ export type CanvasPreviewProps = {
   safeArea: CanvasSafeArea;
   uiOverlayActive: boolean;
   selectedRegionId: string | null;
+  selectedWindowKeys: string[];
   embeddedWindowIds: string[];
   onWindowsChange: (windows: VirtualWindowState[]) => void;
   onRegionsChange: (regions: TemplateRegion[]) => void;
   onSelectRegion: (regionId: string | null) => void;
+  onSelectWindowKeys: (keys: string[]) => void;
+  onCanvasHistoryCheckpoint: () => void;
   onWorkWindow: (hwnd: string) => void;
   onWindowCommand: (hwnd: string, command: WindowCommand) => void;
   onEmbedWindow: (windowInfo: VirtualWindowState, bounds: MoveEmbeddedWindowParams) => void;
@@ -50,6 +53,7 @@ export type WindowDrag = {
   virtualX: number;
   virtualY: number;
   moved: boolean;
+  checkpointed: boolean;
   groupPositions: Array<{ key: string; virtualX: number; virtualY: number }>;
 };
 

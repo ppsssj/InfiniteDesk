@@ -205,6 +205,10 @@ button:disabled {
   cursor: grabbing;
 }
 
+.canvas-surface.space-panning {
+  cursor: grab;
+}
+
 .canvas-surface.moving-window {
   cursor: move;
 }
@@ -1007,6 +1011,33 @@ button:disabled {
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.06);
   padding: 10px;
+}
+
+.details-action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.details-action-grid button {
+  min-height: 32px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  color: #f4f4f5;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 0 9px;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.details-action-grid button:hover:not(:disabled),
+.details-action-grid button:focus-visible:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.details-action-grid button:disabled {
+  opacity: 0.48;
+  cursor: default;
 }
 
 .shortcut-list strong {

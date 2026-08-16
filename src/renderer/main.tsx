@@ -18,12 +18,14 @@ import {
 } from './canvas/layout-helpers';
 import { useWindowControlActions } from './hooks/useWindowControlActions';
 import { CanvasPreview } from './components/CanvasPreview';
+import { getWindowKey } from './components/CanvasPreview.helpers';
 import { Dock } from './components/Dock';
 import { BrandMenu } from './components/BrandMenu';
 import { ViewControls } from './components/ViewControls';
 import { StatusPanel } from './components/StatusPanel';
 import { WorkspaceList } from './components/WorkspaceList';
 import { defaultDockApps } from './dock/apps';
+import { isEditableShortcutTarget, isPrimaryShortcut } from './keyboard';
 import './styles/base.css';
 import './styles/theme.css';
 import './styles/chrome.css';
@@ -31,6 +33,14 @@ import './styles/chrome.css';
 const AUTO_WINDOW_SCAN_INTERVAL_MS = 700;
 const INTERACTION_SCAN_DELAYS_MS = [120, 400, 900, 1600] as const;
 const DOCK_LAUNCH_SCAN_DELAYS_MS = [100, 250, 500, 900, 1500, 2400] as const;
+const MAX_CANVAS_HISTORY = 80;
+
+type CanvasSnapshot = {
+  windows: VirtualWindowState[];
+  regions: TemplateRegion[];
+  previewWorkspace: SavedWorkspace | null;
+  selectedRegionId: string | null;
+};
 
 function App(): React.JSX.Element {
   const [windows, setWindows] = useState<DetectedWindow[]>([]);
@@ -55,16 +65,22 @@ function App(): React.JSX.Element {
   const [zoomScale, setZoomScale] = useState(1);
   const [launchingAppId, setLaunchingAppId] = useState<string | null>(null);
   const [localDockApps, setLocalDockApps] = useState<DockApp[]>([]);
+  const [userPinnedDockApps, setUserPinnedDockApps] = useState<DockApp[]>([]);
   const [isLoadingDockApps, setIsLoadingDockApps] = useState(false);
   const [isDockOverlayActive, setIsDockOverlayActive] = useState(false);
   const [closeDockSignal, setCloseDockSignal] = useState(0);
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
+  const [selectedWindowKeys, setSelectedWindowKeys] = useState<string[]>([]);
   const [overlayModeEnabled, setOverlayModeEnabled] = useState(false);
   const [embeddedWindowIds, setEmbeddedWindowIds] = useState<string[]>([]);
   const [isViewControlsExpanded, setIsViewControlsExpanded] = useState(false);
   const virtualWindowsRef = useRef<VirtualWindowState[]>([]);
   const initialVirtualWindowsRef = useRef<VirtualWindowState[]>([]);
   const regionsRef = useRef<TemplateRegion[]>([]);
+  const previewWorkspaceRef = useRef<SavedWorkspace | null>(null);
+  const selectedRegionIdRef = useRef<string | null>(null);
+  const undoStackRef = useRef<CanvasSnapshot[]>([]);
+  const redoStackRef = useRef<CanvasSnapshot[]>([]);
   const autoScanInFlightRef = useRef(false);
   const autoScanTimersRef = useRef<number[]>([]);
   const latestInteractionSourceRef = useRef('');
@@ -76,7 +92,7 @@ function App(): React.JSX.Element {
   const dirtyCount = virtualWindows.filter((windowInfo) => windowInfo.isDirty).length;
   const restorableCount = useMemo(() => windows.filter((windowInfo) => windowInfo.isRestorable && !windowInfo.isInternal).length, [windows]);
   const dockApps = useMemo(() => {
-    const apps = [...defaultDockApps, ...localDockApps];
+    const apps = [...defaultDockApps, ...userPinnedDockApps, ...localDockApps];
     const seen = new Set<string>();
     return apps.filter((app) => {
       const key = `${app.name.toLowerCase()}|${app.executablePath.toLowerCase()}`;
@@ -86,7 +102,57 @@ function App(): React.JSX.Element {
       seen.add(key);
       return true;
     });
-  }, [localDockApps]);
+  }, [localDockApps, userPinnedDockApps]);
+  const pinnedDockApps = useMemo(() => {
+    const apps = [...defaultDockApps, ...userPinnedDockApps];
+    const seen = new Set<string>();
+    return apps.filter((app) => {
+      const key = `${app.name.toLowerCase()}|${app.executablePath.toLowerCase()}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+  }, [userPinnedDockApps]);
+  const runningDockWindows = useMemo(() => {
+    const canvasWindowsByHwnd = new Map(
+      virtualWindows
+        .filter((windowInfo) => windowInfo.hwnd)
+        .map((windowInfo) => [windowInfo.hwnd!.toLowerCase(), windowInfo])
+    );
+
+    return windows
+      .filter((windowInfo) => !windowInfo.isInternal && windowInfo.hwnd)
+      .map<VirtualWindowState>((windowInfo) => {
+        const existingCanvasWindow = canvasWindowsByHwnd.get(windowInfo.hwnd.toLowerCase());
+        if (existingCanvasWindow) {
+          return {
+            ...existingCanvasWindow,
+            title: windowInfo.title,
+            processName: windowInfo.processName,
+            statusReason: windowInfo.statusReason
+          };
+        }
+
+        return {
+          hwnd: windowInfo.hwnd,
+          title: windowInfo.title,
+          processName: windowInfo.processName,
+          realX: windowInfo.x ?? 0,
+          realY: windowInfo.y ?? 0,
+          virtualX: windowInfo.x ?? 0,
+          virtualY: windowInfo.y ?? 0,
+          width: windowInfo.width ?? 1,
+          height: windowInfo.height ?? 1,
+          initialVirtualX: windowInfo.x ?? 0,
+          initialVirtualY: windowInfo.y ?? 0,
+          isDirty: false,
+          statusReason: windowInfo.statusReason,
+          isHelper: !windowInfo.isRestorable || windowInfo.isIgnored
+        };
+      });
+  }, [virtualWindows, windows]);
   const canvasSafeArea = useMemo(
     () => ({
       left: 16,
@@ -96,6 +162,113 @@ function App(): React.JSX.Element {
     }),
     []
   );
+
+  function cloneCanvasSnapshot(snapshot: CanvasSnapshot): CanvasSnapshot {
+    return {
+      windows: snapshot.windows.map((windowInfo) => ({ ...windowInfo })),
+      regions: snapshot.regions.map((region) => ({ ...region, windowIds: [...region.windowIds] })),
+      previewWorkspace: snapshot.previewWorkspace,
+      selectedRegionId: snapshot.selectedRegionId
+    };
+  }
+
+  function getCanvasSnapshot(): CanvasSnapshot {
+    return cloneCanvasSnapshot({
+      windows: virtualWindowsRef.current,
+      regions: regionsRef.current,
+      previewWorkspace: previewWorkspaceRef.current,
+      selectedRegionId: selectedRegionIdRef.current
+    });
+  }
+
+  function snapshotsMatch(left: CanvasSnapshot, right: CanvasSnapshot): boolean {
+    return JSON.stringify(left) === JSON.stringify(right);
+  }
+
+  function setCanvasWindows(nextWindows: VirtualWindowState[]): void {
+    virtualWindowsRef.current = nextWindows;
+    setVirtualWindows(nextWindows);
+  }
+
+  function setCanvasRegions(nextRegions: TemplateRegion[]): void {
+    regionsRef.current = nextRegions;
+    setRegions(nextRegions);
+  }
+
+  function setCanvasPreviewWorkspace(nextWorkspace: SavedWorkspace | null): void {
+    previewWorkspaceRef.current = nextWorkspace;
+    setPreviewWorkspace(nextWorkspace);
+  }
+
+  function setCanvasSelectedRegionId(nextRegionId: string | null): void {
+    selectedRegionIdRef.current = nextRegionId;
+    setSelectedRegionId(nextRegionId);
+  }
+
+  function clearCanvasHistory(): void {
+    undoStackRef.current = [];
+    redoStackRef.current = [];
+  }
+
+  function checkpointCanvasHistory(): void {
+    const snapshot = getCanvasSnapshot();
+    const latest = undoStackRef.current[undoStackRef.current.length - 1];
+    if (latest && snapshotsMatch(latest, snapshot)) {
+      return;
+    }
+
+    undoStackRef.current = [...undoStackRef.current, snapshot].slice(-MAX_CANVAS_HISTORY);
+    redoStackRef.current = [];
+  }
+
+  function restoreCanvasSnapshot(snapshot: CanvasSnapshot): void {
+    const restored = cloneCanvasSnapshot(snapshot);
+    setCanvasWindows(restored.windows);
+    setCanvasRegions(restored.regions);
+    setCanvasPreviewWorkspace(restored.previewWorkspace);
+    setCanvasSelectedRegionId(restored.selectedRegionId);
+    setActivityWindowHwnds([]);
+  }
+
+  function undoCanvasEdit(): void {
+    const previous = undoStackRef.current.pop();
+    if (!previous) {
+      setMessage('No canvas edit to undo.');
+      return;
+    }
+
+    redoStackRef.current = [...redoStackRef.current, getCanvasSnapshot()].slice(-MAX_CANVAS_HISTORY);
+    restoreCanvasSnapshot(previous);
+    setError(null);
+    setMessage('Undid the last canvas edit.');
+  }
+
+  function redoCanvasEdit(): void {
+    const next = redoStackRef.current.pop();
+    if (!next) {
+      setMessage('No canvas edit to redo.');
+      return;
+    }
+
+    undoStackRef.current = [...undoStackRef.current, getCanvasSnapshot()].slice(-MAX_CANVAS_HISTORY);
+    restoreCanvasSnapshot(next);
+    setError(null);
+    setMessage('Redid the canvas edit.');
+  }
+
+  function pruneCanvasHistoryForClosedWindow(normalizedHwnd: string): void {
+    const pruneSnapshot = (snapshot: CanvasSnapshot): CanvasSnapshot => {
+      const nextWindows = snapshot.windows.filter((windowInfo) => windowInfo.hwnd?.toLowerCase() !== normalizedHwnd);
+      return {
+        ...snapshot,
+        windows: nextWindows,
+        regions: updateRegionMembership(nextWindows, snapshot.regions)
+      };
+    };
+
+    undoStackRef.current = undoStackRef.current.map(pruneSnapshot);
+    redoStackRef.current = redoStackRef.current.map(pruneSnapshot);
+  }
 
   const {
     workInRealWindow,
@@ -126,12 +299,48 @@ function App(): React.JSX.Element {
   async function loadDockApps(): Promise<void> {
     setIsLoadingDockApps(true);
     try {
-      const loaded = await window.infiniteDesk.listDockApps();
+      const [loaded, pinned] = await Promise.all([
+        window.infiniteDesk.listDockApps(),
+        window.infiniteDesk.listPinnedDockApps()
+      ]);
       setLocalDockApps(loaded);
+      setUserPinnedDockApps(pinned);
     } catch (dockError) {
       setError(`Could not load local apps: ${(dockError as Error).message}`);
     } finally {
       setIsLoadingDockApps(false);
+    }
+  }
+
+  async function pinDockApp(dockApp: DockApp): Promise<void> {
+    if (!dockApp.executablePath) {
+      setError(`${dockApp.name} cannot be pinned because it has no launch target.`);
+      return;
+    }
+
+    setError(null);
+    try {
+      const pinned = await window.infiniteDesk.pinDockApp(dockApp);
+      setUserPinnedDockApps(pinned);
+      setMessage(`Pinned ${dockApp.name} to the Dock.`);
+    } catch (pinError) {
+      setError((pinError as Error).message);
+    }
+  }
+
+  async function unpinDockApp(dockApp: DockApp): Promise<void> {
+    if (defaultDockApps.some((defaultApp) => defaultApp.id === dockApp.id)) {
+      setMessage(`${dockApp.name} is a default Dock app.`);
+      return;
+    }
+
+    setError(null);
+    try {
+      const pinned = await window.infiniteDesk.unpinDockApp(dockApp.id);
+      setUserPinnedDockApps(pinned);
+      setMessage(`Removed ${dockApp.name} from the Dock.`);
+    } catch (unpinError) {
+      setError((unpinError as Error).message);
     }
   }
 
@@ -145,12 +354,14 @@ function App(): React.JSX.Element {
       initialVirtualY: windowInfo.virtualY,
       isDirty: false
     }));
-    setVirtualWindows(normalizedWindows);
+    setCanvasWindows(normalizedWindows);
     setInitialVirtualWindows(normalizedWindows);
-    setRegions([]);
-    setSelectedRegionId(null);
-    setPreviewWorkspace(workspace);
+    setCanvasRegions([]);
+    setCanvasSelectedRegionId(null);
+    setSelectedWindowKeys([]);
+    setCanvasPreviewWorkspace(workspace);
     setActivityWindowHwnds([]);
+    clearCanvasHistory();
     setFitSignal((value) => value + 1);
   }
 
@@ -179,6 +390,30 @@ function App(): React.JSX.Element {
 
     cameraFocusRequestIdRef.current += 1;
     setCameraFocusRequest({ id: cameraFocusRequestIdRef.current, hwnd });
+  }
+
+  function selectWindowFromDock(windowInfo: VirtualWindowState, index: number): void {
+    const canvasIndex = windowInfo.hwnd
+      ? virtualWindowsRef.current.findIndex((candidate) => candidate.hwnd?.toLowerCase() === windowInfo.hwnd!.toLowerCase())
+      : index;
+    const canvasWindow = canvasIndex >= 0 ? virtualWindowsRef.current[canvasIndex] : null;
+    if (!canvasWindow) {
+      if (windowInfo.hwnd) {
+        void controlRealWindow(windowInfo.hwnd, 'focus');
+      }
+      setSelectedWindowKeys([]);
+      setMessage(`${windowInfo.title || windowInfo.processName} is running but is not on the canvas.`);
+      return;
+    }
+
+    setSelectedWindowKeys([getWindowKey(canvasWindow, canvasIndex)]);
+    setCanvasSelectedRegionId(null);
+    setIsBrandMenuOpen(false);
+    focusCameraOnWindow(canvasWindow.hwnd);
+  }
+
+  function zoomWindowFromDock(windowInfo: VirtualWindowState, index: number): void {
+    selectWindowFromDock(windowInfo, index);
   }
 
   function markWindowActivity(hwnds: string[]): void {
@@ -312,7 +547,7 @@ function App(): React.JSX.Element {
         const refreshedInitial = refreshVirtualWindowMetadata(initialVirtualWindowsRef.current, detected).windows;
         virtualWindowsRef.current = refreshedWindows;
         initialVirtualWindowsRef.current = refreshedInitial;
-        setVirtualWindows(refreshedWindows);
+        setCanvasWindows(refreshedWindows);
         setInitialVirtualWindows(refreshedInitial);
         setWindows(detected);
       }
@@ -338,10 +573,10 @@ function App(): React.JSX.Element {
       virtualWindowsRef.current = nextWindows;
       initialVirtualWindowsRef.current = nextInitialWindows;
       regionsRef.current = nextRegions;
-      setVirtualWindows(nextWindows);
+      setCanvasWindows(nextWindows);
       setInitialVirtualWindows(nextInitialWindows);
-      setRegions(nextRegions);
-      setPreviewWorkspace(null);
+      setCanvasRegions(nextRegions);
+      setCanvasPreviewWorkspace(null);
       const preferredHwnd = preferredDockApp
         ? detected.find(
             (windowInfo) =>
@@ -403,33 +638,40 @@ function App(): React.JSX.Element {
       (windowInfo) => windowInfo.hwnd?.toLowerCase() !== normalizedHwnd
     );
     const nextRegions = updateRegionMembership(nextWindows, regionsRef.current);
-    virtualWindowsRef.current = nextWindows;
     initialVirtualWindowsRef.current = nextInitialWindows;
-    regionsRef.current = nextRegions;
+    pruneCanvasHistoryForClosedWindow(normalizedHwnd);
     setWindows((current) => current.filter((windowInfo) => windowInfo.hwnd.toLowerCase() !== normalizedHwnd));
-    setVirtualWindows(nextWindows);
+    setCanvasWindows(nextWindows);
     setInitialVirtualWindows(nextInitialWindows);
-    setRegions(nextRegions);
+    setCanvasRegions(nextRegions);
     setEmbeddedWindowIds((current) => current.filter((item) => item.toLowerCase() !== normalizedHwnd));
     setActivityWindowHwnds((current) => current.filter((item) => item !== normalizedHwnd));
-    setPreviewWorkspace(null);
+    setSelectedWindowKeys((current) =>
+      current.filter((key) => nextWindows.some((windowInfo, index) => getWindowKey(windowInfo, index) === key))
+    );
+    setCanvasPreviewWorkspace(null);
     setMessage('A closed application window was removed from InfiniteDesk.');
   }
 
-  async function saveWorkspace(): Promise<void> {
-    if (virtualWindows.length === 0) {
+  async function saveWorkspace(forceNewName = false): Promise<void> {
+    const currentVirtualWindows = virtualWindowsRef.current;
+    if (currentVirtualWindows.length === 0) {
       setError('There is no canvas state to save as a workspace.');
       return;
     }
 
-    const name = window.prompt('Workspace name', previewWorkspace?.name || `Workspace ${new Date().toLocaleString()}`);
+    const defaultName =
+      !forceNewName && previewWorkspace
+        ? previewWorkspace.name
+        : `Workspace ${new Date().toLocaleString()}`;
+    const name = window.prompt('Workspace name', defaultName);
     if (name === null) {
       return;
     }
 
     setError(null);
     try {
-      const savedWindows = virtualWindows.map((windowInfo) => ({
+      const savedWindows = currentVirtualWindows.map((windowInfo) => ({
         ...windowInfo,
         initialVirtualX: windowInfo.virtualX,
         initialVirtualY: windowInfo.virtualY,
@@ -441,10 +683,11 @@ function App(): React.JSX.Element {
         regions: []
       });
       await loadWorkspaces();
-      setPreviewWorkspace(workspace);
-      setRegions([]);
-      setVirtualWindows(savedWindows);
+      setCanvasPreviewWorkspace(workspace);
+      setCanvasRegions([]);
+      setCanvasWindows(savedWindows);
       setInitialVirtualWindows(savedWindows);
+      clearCanvasHistory();
       setMessage(`Saved workspace "${workspace.name}" with ${workspace.windows.length} windows.`);
     } catch (saveError) {
       setError((saveError as Error).message);
@@ -470,7 +713,7 @@ function App(): React.JSX.Element {
   async function deleteWorkspace(workspace: SavedWorkspace): Promise<void> {
     await window.infiniteDesk.deleteWorkspace(workspace.id);
     if (previewWorkspace?.id === workspace.id) {
-      setPreviewWorkspace(null);
+      setCanvasPreviewWorkspace(null);
     }
     await loadWorkspaces();
     setMessage(`Deleted workspace "${workspace.name}".`);
@@ -485,8 +728,10 @@ function App(): React.JSX.Element {
   }
 
   function resetLayoutEdits(): void {
-    setVirtualWindows(initialVirtualWindows.map((windowInfo) => ({ ...windowInfo, isDirty: false })));
-    setRegions((current) => updateRegionMembership(initialVirtualWindows, current.map((region) => ({ ...region, isDirty: false }))));
+    checkpointCanvasHistory();
+    const nextWindows = initialVirtualWindows.map((windowInfo) => ({ ...windowInfo, isDirty: false }));
+    setCanvasWindows(nextWindows);
+    setCanvasRegions(updateRegionMembership(initialVirtualWindows, regionsRef.current.map((region) => ({ ...region, isDirty: false }))));
     setMessage('Canvas layout edits were reset.');
     setIsBrandMenuOpen(false);
   }
@@ -508,6 +753,14 @@ function App(): React.JSX.Element {
   useEffect(() => {
     regionsRef.current = regions;
   }, [regions]);
+
+  useEffect(() => {
+    previewWorkspaceRef.current = previewWorkspace;
+  }, [previewWorkspace]);
+
+  useEffect(() => {
+    selectedRegionIdRef.current = selectedRegionId;
+  }, [selectedRegionId]);
 
   useEffect(() => {
     const unsubscribeInteraction = window.infiniteDesk.onWindowInteractionComplete((sourceHwnd) => {
@@ -543,13 +796,35 @@ function App(): React.JSX.Element {
 
   useEffect(() => {
     function handleShortcuts(event: KeyboardEvent): void {
+      if (isEditableShortcutTarget(event.target)) {
+        return;
+      }
+
       if (event.key === 'Escape') {
         setIsDrawerOpen(false);
         setIsBrandMenuOpen(false);
         return;
       }
 
-      if (!event.ctrlKey) {
+      if (!event.ctrlKey && !event.altKey && !event.metaKey) {
+        const key = event.key.toLowerCase();
+        if (key === 'f') {
+          event.preventDefault();
+          setFitSignal((value) => value + 1);
+        } else if (event.key === '1') {
+          event.preventDefault();
+          setActualSizeSignal((value) => value + 1);
+        } else if (event.key === '+' || event.key === '=') {
+          event.preventDefault();
+          setZoomInSignal((value) => value + 1);
+        } else if (event.key === '-' || event.key === '_') {
+          event.preventDefault();
+          setZoomOutSignal((value) => value + 1);
+        }
+        return;
+      }
+
+      if (!isPrimaryShortcut(event)) {
         return;
       }
 
@@ -558,10 +833,17 @@ function App(): React.JSX.Element {
         void scanWindows();
       } else if (event.key.toLowerCase() === 's') {
         event.preventDefault();
-        void saveWorkspace();
-      } else if (event.key === 'Enter') {
+        void saveWorkspace(event.shiftKey);
+      } else if (event.key.toLowerCase() === 'z') {
         event.preventDefault();
-        void applyCanvasLayout();
+        if (event.shiftKey) {
+          redoCanvasEdit();
+        } else {
+          undoCanvasEdit();
+        }
+      } else if (event.key.toLowerCase() === 'y') {
+        event.preventDefault();
+        redoCanvasEdit();
       } else if (event.key === '0') {
         event.preventDefault();
         setFitSignal((value) => value + 1);
@@ -573,24 +855,17 @@ function App(): React.JSX.Element {
 
     window.addEventListener('keydown', handleShortcuts);
     return () => window.removeEventListener('keydown', handleShortcuts);
-  }, [virtualWindows, overlayModeEnabled]);
+  }, [virtualWindows, overlayModeEnabled, previewWorkspace]);
 
   return (
     <main
-      className={`immersive-shell theme-${themeMode} ${overlayModeEnabled ? 'overlay-mode' : ''} ${isDrawerOpen ? 'drawer-open' : ''} ${isBrandMenuOpen ? 'brand-menu-open' : ''} ${isDockOverlayActive ? 'dock-open' : ''}`}
+      className={`immersive-shell theme-${themeMode} ${overlayModeEnabled ? 'overlay-mode' : ''} ${isDrawerOpen ? 'drawer-open' : ''} ${isBrandMenuOpen ? 'brand-menu-open' : ''} ${isDockOverlayActive ? 'dock-open' : ''} ${virtualWindows.length > 0 ? 'has-running-windows' : ''}`}
     >
       <header className="workspace-top-bar" data-dwm-ui-overlay="true">
         <BrandMenu
           isOpen={isBrandMenuOpen}
           onToggle={() => setIsBrandMenuOpen((value) => !value)}
           onScan={() => void scanWindows()}
-          onSaveWorkspace={() => void saveWorkspace()}
-          onApplyLayout={() => void applyCanvasLayout()}
-          applyDisabled={virtualWindows.length === 0}
-          onResetEdits={resetLayoutEdits}
-          resetDisabled={dirtyCount === 0}
-          onToggleOverlay={() => void toggleOverlayMode()}
-          overlayModeEnabled={overlayModeEnabled}
           onOpenDetails={() => setIsDrawerOpen((value) => !value)}
           onToggleTheme={toggleThemeMode}
           themeMode={themeMode}
@@ -621,10 +896,13 @@ function App(): React.JSX.Element {
           safeArea={canvasSafeArea}
           uiOverlayActive={isDrawerOpen || isDockOverlayActive || isBrandMenuOpen || isViewControlsExpanded}
           selectedRegionId={selectedRegionId}
+          selectedWindowKeys={selectedWindowKeys}
           embeddedWindowIds={embeddedWindowIds}
-          onWindowsChange={setVirtualWindows}
-          onRegionsChange={setRegions}
-          onSelectRegion={setSelectedRegionId}
+          onWindowsChange={setCanvasWindows}
+          onRegionsChange={setCanvasRegions}
+          onSelectRegion={setCanvasSelectedRegionId}
+          onSelectWindowKeys={setSelectedWindowKeys}
+          onCanvasHistoryCheckpoint={checkpointCanvasHistory}
           onWorkWindow={(hwnd) => void workInRealWindow(hwnd)}
           onWindowCommand={(hwnd, command) => void controlRealWindow(hwnd, command)}
           onEmbedWindow={(windowInfo, bounds) => void embedRealWindow(windowInfo, bounds)}
@@ -661,6 +939,12 @@ function App(): React.JSX.Element {
             dirtyCount={dirtyCount}
             workspacesCount={workspaces.length}
             overlayModeEnabled={overlayModeEnabled}
+            applyDisabled={virtualWindows.length === 0}
+            resetDisabled={dirtyCount === 0}
+            onSaveWorkspace={() => void saveWorkspace()}
+            onApplyLayout={() => void applyCanvasLayout()}
+            onResetEdits={resetLayoutEdits}
+            onToggleOverlay={() => void toggleOverlayMode()}
           />
 
           <WorkspaceList
@@ -675,12 +959,43 @@ function App(): React.JSX.Element {
       <footer className="workspace-bottom-bar" data-dwm-ui-overlay="true">
         <Dock
           apps={dockApps}
-          pinnedApps={defaultDockApps}
+          pinnedApps={pinnedDockApps}
+          defaultPinnedAppIds={defaultDockApps.map((dockApp) => dockApp.id)}
+          runningWindows={runningDockWindows}
+          selectedWindowKeys={selectedWindowKeys}
+          activityWindowHwnds={activityWindowHwnds}
           statusLabel={canvasLabel}
           launchingAppId={launchingAppId}
           isLoadingApps={isLoadingDockApps}
           closeSignal={closeDockSignal}
           onLaunch={(dockApp) => void launchDockApp(dockApp)}
+          onPinApp={(dockApp) => void pinDockApp(dockApp)}
+          onUnpinApp={(dockApp) => void unpinDockApp(dockApp)}
+          onSelectWindow={selectWindowFromDock}
+          onFocusWindow={(windowInfo) => windowInfo.hwnd ? void controlRealWindow(windowInfo.hwnd, 'focus') : undefined}
+          onZoomWindow={zoomWindowFromDock}
+          onRemoveWindow={(windowInfo, index) => {
+            const canvasIndex = windowInfo.hwnd
+              ? virtualWindowsRef.current.findIndex((candidate) => candidate.hwnd?.toLowerCase() === windowInfo.hwnd!.toLowerCase())
+              : index;
+            const canvasWindow = canvasIndex >= 0 ? virtualWindowsRef.current[canvasIndex] : null;
+            if (!canvasWindow) {
+              setMessage(`${windowInfo.title || windowInfo.processName} is running but is not on the canvas.`);
+              return;
+            }
+
+            const removedKey = getWindowKey(canvasWindow, canvasIndex);
+            checkpointCanvasHistory();
+            const nextWindows = virtualWindowsRef.current.filter(
+              (candidate, candidateIndex) => getWindowKey(candidate, candidateIndex) !== removedKey
+            );
+            const nextRegions = updateRegionMembership(nextWindows, regionsRef.current);
+            setCanvasWindows(nextWindows);
+            setCanvasRegions(nextRegions);
+            setSelectedWindowKeys((current) => current.filter((key) => key !== removedKey));
+            setCanvasPreviewWorkspace(null);
+          }}
+          onCloseWindow={(windowInfo) => windowInfo.hwnd ? void controlRealWindow(windowInfo.hwnd, 'close') : undefined}
           onOverlayActiveChange={setIsDockOverlayActive}
         />
       </footer>

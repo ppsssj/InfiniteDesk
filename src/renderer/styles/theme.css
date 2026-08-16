@@ -355,6 +355,7 @@
 .virtual-content span,
 .virtual-content b,
 .shortcut-list,
+.details-action-grid button,
 .region-list-item,
 .template-card,
 .empty-state {
@@ -419,6 +420,17 @@
 
 .template-actions button {
   border-color: var(--line);
+}
+
+.details-action-grid button {
+  border-color: var(--line);
+  color: var(--text);
+  background: var(--control);
+}
+
+.details-action-grid button:hover:not(:disabled),
+.details-action-grid button:focus-visible:not(:disabled) {
+  background: var(--control-hover);
 }
 
 .brand-menu .danger-menu-action,

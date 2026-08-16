@@ -18,6 +18,7 @@ import { useCanvasTransform } from '../hooks/useCanvasTransform';
 import { useWindowFrameGeometry } from '../hooks/useWindowFrameGeometry';
 import { useEmbeddedWindowSync } from '../hooks/useEmbeddedWindowSync';
 import { useMirrorPointerRelay } from '../hooks/useMirrorPointerRelay';
+import { isEditableShortcutTarget, isPrimaryShortcut } from '../keyboard';
 
 const CAMERA_FOCUS_ANIMATION_MS = 360;
 
@@ -27,10 +28,13 @@ export function CanvasPreview({
   safeArea,
   uiOverlayActive,
   selectedRegionId,
+  selectedWindowKeys,
   embeddedWindowIds,
   onWindowsChange,
   onRegionsChange,
   onSelectRegion,
+  onSelectWindowKeys,
+  onCanvasHistoryCheckpoint,
   onWorkWindow,
   onWindowCommand,
   onEmbedWindow,
@@ -60,7 +64,7 @@ export function CanvasPreview({
   const cameraAnimationFrameRef = useRef<number | null>(null);
   const transformRef = useRef<CanvasTransform>({ offsetX: 0, offsetY: 0, scale: 1 });
   const [dragMode, setDragMode] = useState<'none' | 'pan' | 'window' | 'select-windows'>('none');
-  const [selectedWindowKeys, setSelectedWindowKeys] = useState<string[]>([]);
+  const [isSpacePanning, setIsSpacePanning] = useState(false);
   const [selectionRect, setSelectionRect] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const embeddedWindowIdSet = useMemo(() => new Set(embeddedWindowIds), [embeddedWindowIds]);
@@ -123,7 +127,7 @@ export function CanvasPreview({
   useEffect(() => {
     windowsRef.current = windows;
     const visibleKeys = new Set(windows.map((windowInfo, index) => getWindowKey(windowInfo, index)));
-    setSelectedWindowKeys((current) => current.filter((key) => visibleKeys.has(key)));
+    onSelectWindowKeys(selectedWindowKeys.filter((key) => visibleKeys.has(key)));
   }, [windows]);
 
   useEffect(() => {
@@ -240,6 +244,148 @@ export function CanvasPreview({
     return () => window.removeEventListener('keydown', closeContextMenu);
   }, []);
 
+  useEffect(() => {
+    function isInteractiveShortcutTarget(target: EventTarget | null): boolean {
+      return target instanceof HTMLElement && Boolean(target.closest('button, a, [role="button"]'));
+    }
+
+    function selectedWindowEntries(): Array<{ key: string; windowInfo: VirtualWindowState }> {
+      const selectedKeys = new Set(selectedWindowKeys);
+      return windowsRef.current.flatMap((windowInfo, index) => {
+        const key = getWindowKey(windowInfo, index);
+        return selectedKeys.has(key) ? [{ key, windowInfo }] : [];
+      });
+    }
+
+    function updateSelectedWindows(
+      updater: (windowInfo: VirtualWindowState, key: string) => VirtualWindowState,
+      checkpoint = true
+    ): void {
+      if (selectedWindowKeys.length === 0) {
+        return;
+      }
+
+      const selectedKeys = new Set(selectedWindowKeys);
+      if (checkpoint) {
+        onCanvasHistoryCheckpoint();
+      }
+      const nextWindows = windowsRef.current.map((windowInfo, index) => {
+        const key = getWindowKey(windowInfo, index);
+        return selectedKeys.has(key) ? updater(windowInfo, key) : windowInfo;
+      });
+      const nextRegions = updateRegionMembership(nextWindows, regionsRef.current);
+      windowsRef.current = nextWindows;
+      regionsRef.current = nextRegions;
+      onWindowsChange(nextWindows);
+      onRegionsChange(nextRegions);
+      flushEmbeddedWindowPositions();
+    }
+
+    function removeSelectedWindows(): void {
+      if (selectedWindowKeys.length === 0) {
+        return;
+      }
+
+      const selectedKeys = new Set(selectedWindowKeys);
+      onCanvasHistoryCheckpoint();
+      const nextWindows = windowsRef.current.filter((windowInfo, index) => !selectedKeys.has(getWindowKey(windowInfo, index)));
+      const nextRegions = updateRegionMembership(nextWindows, regionsRef.current);
+      windowsRef.current = nextWindows;
+      regionsRef.current = nextRegions;
+      onWindowsChange(nextWindows);
+      onRegionsChange(nextRegions);
+      onSelectWindowKeys([]);
+      setContextMenu(null);
+    }
+
+    function handleCanvasShortcuts(event: KeyboardEvent): void {
+      if (isEditableShortcutTarget(event.target)) {
+        return;
+      }
+
+      if (event.key === ' ' && !event.ctrlKey && !event.altKey && !event.metaKey && !isInteractiveShortcutTarget(event.target)) {
+        event.preventDefault();
+        setIsSpacePanning(true);
+        return;
+      }
+
+      if (event.altKey && !event.ctrlKey && !event.metaKey && event.key.startsWith('Arrow')) {
+        const delta = event.shiftKey ? 50 : 10;
+        const dx = event.key === 'ArrowLeft' ? -delta : event.key === 'ArrowRight' ? delta : 0;
+        const dy = event.key === 'ArrowUp' ? -delta : event.key === 'ArrowDown' ? delta : 0;
+        if (dx !== 0 || dy !== 0) {
+          event.preventDefault();
+          updateSelectedWindows((windowInfo) => ({
+            ...windowInfo,
+            virtualX: Math.round(windowInfo.virtualX + dx),
+            virtualY: Math.round(windowInfo.virtualY + dy),
+            isDirty: true
+          }), !event.repeat);
+        }
+        return;
+      }
+
+      if (isPrimaryShortcut(event) && event.key.toLowerCase() === 'a') {
+        event.preventDefault();
+        onSelectWindowKeys(windowsRef.current.map((windowInfo, index) => getWindowKey(windowInfo, index)));
+        setContextMenu(null);
+        return;
+      }
+
+      const selectedEntries = selectedWindowEntries();
+      const primarySelection = selectedEntries[0]?.windowInfo;
+      if (!primarySelection) {
+        return;
+      }
+
+      if (isPrimaryShortcut(event) && event.key === 'Enter') {
+        event.preventDefault();
+        zoomToWindowNode(primarySelection);
+        return;
+      }
+
+      if (isPrimaryShortcut(event) && event.key.toLowerCase() === 'e') {
+        event.preventDefault();
+        if (isEmbeddedWindow(primarySelection)) {
+          detachEmbeddedWindow(primarySelection);
+        } else {
+          embedWindow(primarySelection);
+        }
+        return;
+      }
+
+      if (!event.ctrlKey && !event.altKey && !event.metaKey && event.key === 'Enter') {
+        event.preventDefault();
+        runWindowCommand(primarySelection, 'focus');
+        return;
+      }
+
+      if (!event.ctrlKey && !event.altKey && !event.metaKey && (event.key === 'Delete' || event.key === 'Backspace')) {
+        event.preventDefault();
+        removeSelectedWindows();
+      }
+    }
+
+    function handleKeyUp(event: KeyboardEvent): void {
+      if (event.key === ' ') {
+        setIsSpacePanning(false);
+      }
+    }
+
+    function handleBlur(): void {
+      setIsSpacePanning(false);
+    }
+
+    window.addEventListener('keydown', handleCanvasShortcuts);
+    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleBlur);
+    return () => {
+      window.removeEventListener('keydown', handleCanvasShortcuts);
+      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleBlur);
+    };
+  });
+
   function normalizeSelectionRect(startX: number, startY: number, endX: number, endY: number): { x: number; y: number; width: number; height: number } {
     const x = Math.min(startX, endX);
     const y = Math.min(startY, endY);
@@ -260,6 +406,18 @@ export function CanvasPreview({
     );
   }
 
+  function startPanDrag(event: React.PointerEvent<HTMLElement>, captureTarget: HTMLElement): void {
+    dragRef.current = {
+      type: 'pan',
+      startX: event.clientX,
+      startY: event.clientY,
+      offsetX: transform.offsetX,
+      offsetY: transform.offsetY
+    };
+    setDragMode('pan');
+    captureTarget.setPointerCapture(event.pointerId);
+  }
+
   function handleCanvasPointerDown(event: React.PointerEvent<HTMLDivElement>): void {
     if (event.button !== 0 || event.target !== event.currentTarget) {
       return;
@@ -278,7 +436,7 @@ export function CanvasPreview({
     const screenX = event.clientX - rect.left;
     const screenY = event.clientY - rect.top;
 
-    if (event.ctrlKey) {
+    if (event.ctrlKey && !isSpacePanning) {
       const worldPoint = screenToWorld(screenX, screenY, transform);
       dragRef.current = {
         type: 'select-windows',
@@ -288,18 +446,9 @@ export function CanvasPreview({
       setSelectionRect({ x: worldPoint.x, y: worldPoint.y, width: 0, height: 0 });
       setDragMode('select-windows');
     } else {
-      setSelectedWindowKeys([]);
-      dragRef.current = {
-        type: 'pan',
-        startX: event.clientX,
-        startY: event.clientY,
-        offsetX: transform.offsetX,
-        offsetY: transform.offsetY
-      };
-      setDragMode('pan');
+      onSelectWindowKeys([]);
+      startPanDrag(event, event.currentTarget);
     }
-
-    event.currentTarget.setPointerCapture(event.pointerId);
   }
 
   function handleWindowPointerDown(
@@ -317,6 +466,14 @@ export function CanvasPreview({
     cancelCameraAnimation();
     setContextMenu(null);
     event.stopPropagation();
+    if (isSpacePanning) {
+      const canvas = canvasRef.current;
+      if (canvas) {
+        startPanDrag(event, canvas);
+      }
+      return;
+    }
+
     const currentSelection = selectedWindowKeys.includes(key) ? selectedWindowKeys : [key];
     const nextSelection = event.ctrlKey
       ? selectedWindowKeys.includes(key)
@@ -324,7 +481,7 @@ export function CanvasPreview({
         : [...selectedWindowKeys, key]
       : currentSelection;
     const dragSelection = nextSelection.length > 0 ? nextSelection : [key];
-    setSelectedWindowKeys(dragSelection);
+    onSelectWindowKeys(dragSelection);
     dragRef.current = {
       type: 'window',
       key,
@@ -333,6 +490,7 @@ export function CanvasPreview({
       virtualX: windowInfo.virtualX,
       virtualY: windowInfo.virtualY,
       moved: false,
+      checkpointed: false,
       groupPositions: windowsRef.current
         .map((candidate, index) => ({
           key: getWindowKey(candidate, index),
@@ -375,7 +533,15 @@ export function CanvasPreview({
     const deltaY = (event.clientY - drag.startY) / transform.scale;
 
     if (drag.type === 'window') {
-      drag.moved = Math.abs(deltaX) > 2 || Math.abs(deltaY) > 2;
+      const hasMoved = Math.abs(deltaX) > 2 || Math.abs(deltaY) > 2;
+      if (hasMoved && !drag.checkpointed) {
+        onCanvasHistoryCheckpoint();
+        drag.checkpointed = true;
+      }
+      drag.moved = hasMoved;
+      if (!hasMoved) {
+        return;
+      }
       const groupPositions = new Map(drag.groupPositions.map((item) => [item.key, item]));
       const nextWindows = windowsRef.current.map((windowInfo, index) => {
         const startingPosition = groupPositions.get(getWindowKey(windowInfo, index));
@@ -403,7 +569,7 @@ export function CanvasPreview({
       const nextSelectedKeys = windowsRef.current.flatMap((windowInfo, index) =>
         windowIntersectsSelection(windowInfo, selectionRect) ? [getWindowKey(windowInfo, index)] : []
       );
-      setSelectedWindowKeys(nextSelectedKeys);
+      onSelectWindowKeys(nextSelectedKeys);
     } else if (drag?.type === 'window') {
       onRegionsChange(updateRegionMembership(windowsRef.current, regionsRef.current));
       flushEmbeddedWindowPositions();
@@ -471,6 +637,7 @@ export function CanvasPreview({
   }
 
   function resetWindowPosition(key: string): void {
+    onCanvasHistoryCheckpoint();
     const nextWindows = windowsRef.current.map((windowInfo, index) =>
       getWindowKey(windowInfo, index) === key
         ? {
@@ -487,6 +654,7 @@ export function CanvasPreview({
   }
 
   function removeWindowFromCanvas(key: string): void {
+    onCanvasHistoryCheckpoint();
     const nextWindows = windowsRef.current.filter((windowInfo, index) => getWindowKey(windowInfo, index) !== key);
     windowsRef.current = nextWindows;
     onWindowsChange(nextWindows);
@@ -592,7 +760,7 @@ export function CanvasPreview({
     <section className="canvas-preview">
       <div
         ref={canvasRef}
-        className={`canvas-surface ${dragMode === 'pan' ? 'dragging' : ''} ${dragMode !== 'none' && dragMode !== 'pan' ? 'moving-window' : ''}`}
+        className={`canvas-surface ${dragMode === 'pan' ? 'dragging' : ''} ${dragMode !== 'none' && dragMode !== 'pan' ? 'moving-window' : ''} ${isSpacePanning ? 'space-panning' : ''}`}
         onPointerDown={handleCanvasPointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}

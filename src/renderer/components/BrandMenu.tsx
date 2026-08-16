@@ -1,18 +1,11 @@
 import React from 'react';
-import { BriefcaseBusiness, LocateFixed, LogOut, Menu, Palette, RefreshCw, RotateCcw, Send } from 'lucide-react';
+import { LogOut, Menu, Palette, RefreshCw } from 'lucide-react';
 import logoMarkUrl from '../assets/logo-mark.png';
 
 type BrandMenuProps = {
   isOpen: boolean;
   onToggle: () => void;
   onScan: () => void;
-  onSaveWorkspace: () => void;
-  onApplyLayout: () => void;
-  applyDisabled: boolean;
-  onResetEdits: () => void;
-  resetDisabled: boolean;
-  onToggleOverlay: () => void;
-  overlayModeEnabled: boolean;
   onOpenDetails: () => void;
   onToggleTheme: () => void;
   themeMode: 'mist' | 'graphite';
@@ -23,13 +16,6 @@ export function BrandMenu({
   isOpen,
   onToggle,
   onScan,
-  onSaveWorkspace,
-  onApplyLayout,
-  applyDisabled,
-  onResetEdits,
-  resetDisabled,
-  onToggleOverlay,
-  overlayModeEnabled,
   onOpenDetails,
   onToggleTheme,
   themeMode,
@@ -45,22 +31,6 @@ export function BrandMenu({
           <button onClick={onScan}>
             <RefreshCw size={15} />
             Scan Windows
-          </button>
-          <button onClick={onSaveWorkspace}>
-            <BriefcaseBusiness size={15} />
-            Save Workspace
-          </button>
-          <button onClick={onApplyLayout} disabled={applyDisabled}>
-            <Send size={15} />
-            Apply Layout
-          </button>
-          <button onClick={onResetEdits} disabled={resetDisabled}>
-            <RotateCcw size={15} />
-            Reset Edits
-          </button>
-          <button onClick={onToggleOverlay}>
-            <LocateFixed size={15} />
-            Native Overlay {overlayModeEnabled ? 'Off' : 'On'}
           </button>
           <button onClick={onOpenDetails}>
             <Menu size={15} />
