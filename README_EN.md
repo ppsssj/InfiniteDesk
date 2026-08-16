@@ -12,7 +12,7 @@
   <a href="https://github.com/ppsssj/InfiniteDesk/releases/download/v0.1.0/InfiniteDesk.Setup.0.1.0.exe"><strong>Download InfiniteDesk 0.1.0 for Windows</strong></a>
 </p>
 
-InfiniteDesk is a desktop layout controller for Windows. It lets you scan currently running app windows, preview them in one workspace, arrange them on a canvas, and apply that layout back to the real desktop.
+InfiniteDesk is a desktop layout controller for Windows. It scans running app windows, shows them on a canvas, lets you arrange them, and applies that layout back to the real desktop.
 
 It is designed for workflows where several apps are open at once and window placement matters.
 
@@ -40,6 +40,7 @@ The current installer is not code-signed, so Windows SmartScreen or security war
 ## Features
 
 - Scan currently open Windows app windows.
+- Detect running windows, including minimized windows.
 - Preview real windows with DWM-based live previews.
 - Move and arrange window cards on a canvas.
 - Apply the canvas layout back to real Windows windows.
@@ -47,9 +48,25 @@ The current installer is not code-signed, so Windows SmartScreen or security war
 - Move selected window groups together.
 - Pan horizontally with `Shift + Scroll`.
 - Save frequently used window arrangements as Workspaces.
-- Search and launch local apps from the Dock.
+- Search, pin, unpin, and launch local apps from the Dock.
+- Unpin and restore default Dock apps.
+- Launch apps at a canvas coordinate from the empty-canvas context menu.
+- Pin a running window to the side Quick Launch preview panel.
+- Drag, resize, and side-snap the Quick Launch panel.
 - Use Mirror Control to relay clicks, drags, and scrolling from the preview to the original window.
 - Use Native Overlay as a translucent control layer above the real desktop.
+
+## Quick Launch Preview
+
+Quick Launch preview temporarily pins a running window to a side panel so it stays visible while you work.
+
+- Right-click a window card on the canvas and choose `Pin to Quick Launch`.
+- A window pinned to Quick Launch is hidden from the canvas. Removing it from Quick Launch restores it to its original canvas position.
+- The panel can be dragged and resized.
+- If the panel is moved toward the center, it smoothly snaps back to the nearest left or right side.
+- Quick Launch items are session-only. They are not restored after InfiniteDesk is closed and opened again.
+
+Video windows such as YouTube may stutter or render black in DWM previews depending on browser GPU rendering, minimized-window behavior, and protected-content policies. Keeping the source browser window unminimized is usually more reliable for video playback.
 
 ## Usage
 
@@ -58,9 +75,10 @@ The current installer is not code-signed, so Windows SmartScreen or security war
 3. Arrange window previews on the canvas.
 4. Use `Ctrl + Drag` on empty canvas space to select multiple windows.
 5. Drag one selected window to move the selected group together.
-6. Click `Save Workspace` or press `Ctrl + S` to save the current arrangement.
-7. Click `Apply Layout` or press `Ctrl + Enter` to apply the canvas layout to real windows.
-8. Use Native Overlay and Mirror Control when you need more direct control over real windows.
+6. Right-click empty canvas space to launch an app at that canvas coordinate.
+7. Right-click a window card to pin it to Quick Launch, open the real window, remove it from the canvas, or close the real window.
+8. Click `Save Workspace` or press `Ctrl + S` to save the current arrangement.
+9. Click `Apply Layout` or press `Ctrl + Enter` to apply the canvas layout to real windows.
 
 ## Development
 
@@ -111,4 +129,3 @@ See [PRIVACY.md](PRIVACY.md) for details.
 InfiniteDesk itself is not open source licensed. See [NOTICE.md](NOTICE.md).
 
 Third-party open source notices are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
