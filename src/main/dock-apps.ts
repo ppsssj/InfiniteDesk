@@ -12,14 +12,6 @@ const ICON_WORKER_COUNT = 8;
 
 const DEFAULT_DOCK_APPS: DockApp[] = [
   {
-    id: 'vscode',
-    name: 'VS Code',
-    executablePath: 'code',
-    processName: 'Code',
-    icon: 'VS',
-    isPinned: true
-  },
-  {
     id: 'chrome',
     name: 'Chrome',
     executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -37,10 +29,18 @@ const DEFAULT_DOCK_APPS: DockApp[] = [
   },
   {
     id: 'explorer',
-    name: 'Explorer',
+    name: 'File Explorer',
     executablePath: 'explorer.exe',
     processName: 'explorer',
-    icon: 'EX',
+    icon: 'FE',
+    isPinned: true
+  },
+  {
+    id: 'settings',
+    name: 'Settings',
+    executablePath: 'ms-settings:',
+    processName: 'SystemSettings',
+    icon: 'SE',
     isPinned: true
   }
 ];

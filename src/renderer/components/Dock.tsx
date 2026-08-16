@@ -3,11 +3,11 @@ import { ChevronDown, ChevronUp, Crosshair, Grid3X3, Pin, PinOff, Search, X } fr
 import type { DockApp } from '../../shared/types';
 import type { VirtualWindowState } from '../canvas/types';
 import { getWindowKey } from './CanvasPreview.helpers';
+import { getDockAppIdentityKey } from '../dock/identity';
 
 type DockProps = {
   apps: DockApp[];
   pinnedApps: DockApp[];
-  defaultPinnedAppIds: string[];
   runningWindows: VirtualWindowState[];
   selectedWindowKeys: string[];
   activityWindowHwnds: string[];
@@ -66,7 +66,6 @@ function getWindowInitials(windowInfo: VirtualWindowState): string {
 export function Dock({
   apps,
   pinnedApps,
-  defaultPinnedAppIds,
   runningWindows,
   selectedWindowKeys,
   activityWindowHwnds,
@@ -90,9 +89,8 @@ export function Dock({
   const [runningWindowStartIndex, setRunningWindowStartIndex] = React.useState(0);
   const lastRunningWindowWheelAtRef = React.useRef(0);
   const normalizedQuery = query.trim().toLowerCase();
-  const defaultPinnedAppIdSet = React.useMemo(() => new Set(defaultPinnedAppIds), [defaultPinnedAppIds]);
   const pinnedAppKeySet = React.useMemo(
-    () => new Set(pinnedApps.map((app) => `${app.name.toLowerCase()}|${app.executablePath.toLowerCase()}`)),
+    () => new Set(pinnedApps.map(getDockAppIdentityKey)),
     [pinnedApps]
   );
   const selectedWindowKeySet = React.useMemo(() => new Set(selectedWindowKeys), [selectedWindowKeys]);
@@ -151,9 +149,9 @@ export function Dock({
   );
 
   React.useEffect(() => {
-    onOverlayActiveChange(shouldShowResults || isMenuOpen);
+    onOverlayActiveChange(shouldShowResults);
     return () => onOverlayActiveChange(false);
-  }, [isMenuOpen, onOverlayActiveChange, shouldShowResults]);
+  }, [onOverlayActiveChange, shouldShowResults]);
 
   React.useEffect(() => {
     setQuery('');
@@ -185,7 +183,7 @@ export function Dock({
   }, []);
 
   function isPinned(app: DockApp): boolean {
-    return pinnedAppKeySet.has(`${app.name.toLowerCase()}|${app.executablePath.toLowerCase()}`);
+    return pinnedAppKeySet.has(getDockAppIdentityKey(app));
   }
 
   function getDockAppIconDataUrl(app: DockApp): string | undefined {
@@ -204,17 +202,14 @@ export function Dock({
     return processIconByName.get(processName) || processIconByName.get(title);
   }
 
-  function canUnpin(app: DockApp): boolean {
-    return !defaultPinnedAppIdSet.has(app.id);
-  }
-
   function openAppMenu(event: React.MouseEvent<HTMLElement>, app: DockApp): void {
     event.preventDefault();
     event.stopPropagation();
+    event.nativeEvent.stopImmediatePropagation();
     setMenu({
       type: 'app',
       x: Math.min(event.clientX, window.innerWidth - 180),
-      y: Math.min(event.clientY, window.innerHeight - 160),
+      y: Math.min(event.clientY + 6, window.innerHeight - 48),
       app
     });
   }
@@ -222,6 +217,7 @@ export function Dock({
   function openWindowMenu(event: React.MouseEvent<HTMLElement>, windowInfo: VirtualWindowState, index: number): void {
     event.preventDefault();
     event.stopPropagation();
+    event.nativeEvent.stopImmediatePropagation();
     setMenu({
       type: 'window',
       x: Math.min(event.clientX, window.innerWidth - 190),
@@ -234,6 +230,16 @@ export function Dock({
   function runMenuAction(action: () => void): void {
     setMenu(null);
     action();
+  }
+
+  function stopSecondaryPointer(event: React.PointerEvent<HTMLElement>): void {
+    if (event.button === 0) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.nativeEvent.stopImmediatePropagation();
   }
 
   function showPreviousRunningWindows(): void {
@@ -283,6 +289,10 @@ export function Dock({
         <button
           className={`dock-all-apps-button ${isAllAppsOpen ? 'active' : ''}`}
           title="Show all apps"
+          onContextMenu={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
           onClick={() => {
             setMenu(null);
             setQuery('');
@@ -309,7 +319,12 @@ export function Dock({
               <button
                 className={`dock-result-item ${isPinned(app) ? 'pinned' : ''}`}
                 key={app.id}
-                onClick={() => {
+                onPointerDown={stopSecondaryPointer}
+                onClick={(event) => {
+                  if (event.button !== 0) {
+                    return;
+                  }
+
                   setQuery('');
                   setIsAllAppsOpen(false);
                   setMenu(null);
@@ -333,19 +348,15 @@ export function Dock({
       {menu ? (
         <div
           className="dock-context-menu"
+          data-dwm-ui-overlay="true"
           style={{ left: menu.x, top: menu.y }}
           onPointerDown={(event) => event.stopPropagation()}
         >
           {menu.type === 'app' ? (
-            isPinned(menu.app) && canUnpin(menu.app) ? (
+            isPinned(menu.app) ? (
               <button onClick={() => runMenuAction(() => onUnpinApp(menu.app))}>
                 <PinOff size={13} />
                 Unpin from Dock
-              </button>
-            ) : isPinned(menu.app) ? (
-              <button disabled>
-                <Pin size={13} />
-                Pinned
               </button>
             ) : (
               <button onClick={() => runMenuAction(() => onPinApp(menu.app))}>
@@ -429,7 +440,14 @@ export function Dock({
           <button
             className={`dock-item ${launchingAppId === app.id ? 'launching' : ''}`}
             key={app.id}
-            onClick={() => onLaunch(app)}
+            onPointerDown={stopSecondaryPointer}
+            onClick={(event) => {
+              if (event.button !== 0) {
+                return;
+              }
+
+              onLaunch(app);
+            }}
             onContextMenu={(event) => openAppMenu(event, app)}
             title={app.name}
             disabled={launchingAppId === app.id}
