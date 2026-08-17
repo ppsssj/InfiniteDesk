@@ -55,6 +55,7 @@ const api = {
   moveEmbeddedWindow: (params: MoveEmbeddedWindowParams): Promise<EmbedResult> => ipcRenderer.invoke('window:move-embedded', params),
   syncDwmPreviews: (previews: DwmPreviewWindow[]): Promise<DwmPreviewResult> => ipcRenderer.invoke('dwm:sync-previews', previews),
   clearDwmPreviews: (): Promise<DwmPreviewResult> => ipcRenderer.invoke('dwm:clear-previews'),
+  cancelAutoInput: (hwnd: string): Promise<DwmPreviewResult> => ipcRenderer.invoke('dwm:cancel-auto-input', hwnd),
   controlWindow: (hwnd: string, command: WindowCommand): Promise<WindowCommandResult> =>
     ipcRenderer.invoke('window:command', hwnd, command),
   relayPointerInput: (input: RelayPointerInput): Promise<RelayPointerResult> => ipcRenderer.invoke('window:relay-pointer', input),
@@ -67,6 +68,11 @@ const api = {
     const listener = (_event: Electron.IpcRendererEvent, hwnd: string): void => callback(hwnd);
     ipcRenderer.on('windows:closed', listener);
     return () => ipcRenderer.removeListener('windows:closed', listener);
+  },
+  onAutoAttachRequest: (callback: (hwnd: string) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, hwnd: string): void => callback(hwnd);
+    ipcRenderer.on('windows:auto-attach-request', listener);
+    return () => ipcRenderer.removeListener('windows:auto-attach-request', listener);
   },
   onInteractiveShortcut: (callback: (action: 'toggle-embed' | 'scan') => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, action: 'toggle-embed' | 'scan'): void => callback(action);

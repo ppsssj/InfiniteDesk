@@ -51,6 +51,13 @@ function ensureDwmPreviewHost(): ChildProcessWithoutNullStreams {
         ) {
           dwmPreviewOwner.webContents.send('windows:interaction-complete', message.hwnd);
         } else if (
+          message.event === 'auto-attach-request' &&
+          message.hwnd &&
+          dwmPreviewOwner &&
+          !dwmPreviewOwner.isDestroyed()
+        ) {
+          dwmPreviewOwner.webContents.send('windows:auto-attach-request', message.hwnd);
+        } else if (
           message.event === 'window-closed' &&
           message.hwnd &&
           dwmPreviewOwner &&

@@ -59,6 +59,19 @@ namespace InfiniteDeskPreview {
     public string controllerHwnd { get; set; }
   }
 
+  public class PendingAutoInput {
+    public string kind { get; set; }
+    public double normalizedX { get; set; }
+    public double normalizedY { get; set; }
+    public string button { get; set; }
+    public int clickCount { get; set; }
+    public int wheelDelta { get; set; }
+    public int wheelDeltaX { get; set; }
+    public bool shiftKey { get; set; }
+    public bool ctrlKey { get; set; }
+    public bool altKey { get; set; }
+  }
+
   [StructLayout(LayoutKind.Sequential)]
   public struct Rect {
     public int left;
@@ -1050,6 +1063,23 @@ namespace InfiniteDeskPreview {
     [DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int virtualKey);
 
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorInfo(ref CursorInfo cursorInfo);
+
+    [DllImport("user32.dll")]
+    private static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+
+    [DllImport("user32.dll")]
+    private static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CursorInfo {
+      public int cbSize;
+      public int flags;
+      public IntPtr hCursor;
+      public Point ptScreenPos;
+    }
+
     private IntPtr thumbnail = IntPtr.Zero;
     private IntPtr sourceHwnd = IntPtr.Zero;
     private IntPtr ownerHwnd = IntPtr.Zero;
@@ -1059,6 +1089,7 @@ namespace InfiniteDeskPreview {
     private RectangleF desiredSourceCrop = new RectangleF(0, 0, 1, 1);
     private byte desiredOpacity = 255;
     private bool desiredOwnerIsTopmost;
+    private bool previewSuspended;
     private bool pointerIsDown;
     private string pressedButton = "left";
     private double lastNormalizedX;
@@ -1069,11 +1100,28 @@ namespace InfiniteDeskPreview {
     private bool redirectingRealInput;
     private bool restoreChordDown;
     private Point savedPhysicalCursor;
+    private Point lastRealInputCursor;
+    private double cursorScaleRemainderX;
+    private double cursorScaleRemainderY;
     private Rect realInputTargetBounds;
+    private readonly List<PendingAutoInput> pendingAutoInputs = new List<PendingAutoInput>();
+    private DateTime pendingAutoInputSinceUtc;
+    private bool autoAttachRequestSent;
     private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
     private const int VK_CONTROL = 0x11;
+    private const int VK_SHIFT = 0x10;
     private const int VK_MENU = 0x12;
     private const int VK_F10 = 0x79;
+    private const int CURSOR_SHOWING = 0x00000001;
+    private const uint KEYEVENTF_KEYUP = 0x0002;
+    private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+    private const uint MOUSEEVENTF_LEFTUP = 0x0004;
+    private const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
+    private const uint MOUSEEVENTF_RIGHTUP = 0x0010;
+    private const uint MOUSEEVENTF_MIDDLEDOWN = 0x0020;
+    private const uint MOUSEEVENTF_MIDDLEUP = 0x0040;
+    private const uint MOUSEEVENTF_WHEEL = 0x0800;
+    private const uint MOUSEEVENTF_HWHEEL = 0x1000;
 
     public IntPtr SourceHwnd {
       get { return sourceHwnd; }
@@ -1090,7 +1138,7 @@ namespace InfiniteDeskPreview {
       Height = 1;
       softwareCursor = new SoftwareCursorForm();
       realInputTimer = new System.Windows.Forms.Timer();
-      realInputTimer.Interval = 16;
+      realInputTimer.Interval = 8;
       realInputTimer.Tick += delegate(object sender, EventArgs args) { TickRealInput(); };
       realInputTimer.Start();
     }
@@ -1153,6 +1201,11 @@ namespace InfiniteDeskPreview {
       desiredOwnerIsTopmost = ownerIsTopmost;
       Bounds = bounds;
       currentSourceCrop = sourceCrop;
+
+      if (previewSuspended) {
+        HideWindowOnly();
+        return;
+      }
 
       // Chromium stops producing its web-content composition surface while a
       // top-level window is minimized. Restore it without activation so DWM
@@ -1306,10 +1359,20 @@ namespace InfiniteDeskPreview {
       RetryPendingPreview();
     }
 
-    private void EnterRealInput(Point previewPoint) {
+    public void SuspendPreview() {
+      previewSuspended = true;
+      HideWindowOnly();
+    }
+
+    public void ResumePreview() {
+      previewSuspended = false;
+      RefreshPreviewRegistration();
+    }
+
+    private bool EnterRealInput(Point previewPoint) {
       if (!realInputEnabled || redirectingRealInput || sourceHwnd == IntPtr.Zero ||
           ClientSize.Width <= 1 || ClientSize.Height <= 1) {
-        return;
+        return false;
       }
 
       Point currentCursor;
@@ -1317,7 +1380,15 @@ namespace InfiniteDeskPreview {
       if (!GetCursorPos(out currentCursor) ||
           DwmGetWindowAttribute(sourceHwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out targetBounds, Marshal.SizeOf(typeof(Rect))) != 0 ||
           targetBounds.right - targetBounds.left <= 1 || targetBounds.bottom - targetBounds.top <= 1) {
-        return;
+        return false;
+      }
+      Rectangle targetScreenBounds = Screen.FromHandle(sourceHwnd).Bounds;
+      targetBounds.left = Math.Max(targetBounds.left, targetScreenBounds.Left);
+      targetBounds.top = Math.Max(targetBounds.top, targetScreenBounds.Top);
+      targetBounds.right = Math.Min(targetBounds.right, targetScreenBounds.Right);
+      targetBounds.bottom = Math.Min(targetBounds.bottom, targetScreenBounds.Bottom);
+      if (targetBounds.right - targetBounds.left <= 1 || targetBounds.bottom - targetBounds.top <= 1) {
+        return false;
       }
 
       double localX = Math.Max(0.0, Math.Min(1.0, (double)previewPoint.X / Math.Max(1, ClientSize.Width - 1)));
@@ -1333,18 +1404,26 @@ namespace InfiniteDeskPreview {
       ReleaseCapture();
       SetForegroundWindow(sourceHwnd);
       SetCursorPos(targetX, targetY);
+      lastRealInputCursor = new Point(targetX, targetY);
+      cursorScaleRemainderX = 0;
+      cursorScaleRemainderY = 0;
       ClipCursor(ref realInputTargetBounds);
       redirectingRealInput = true;
       softwareCursor.ShowInactive();
       UpdateSoftwareCursor();
       Console.Out.WriteLine("{\"event\":\"real-input-started\",\"hwnd\":\"" + HwndToString(sourceHwnd) + "\"}");
       Console.Out.Flush();
+      return true;
     }
 
     private void ExitRealInput() {
+      ExitRealInput(savedPhysicalCursor);
+    }
+
+    private void ExitRealInput(Point physicalCursor) {
       ClipCursor(IntPtr.Zero);
       if (redirectingRealInput) {
-        SetCursorPos(savedPhysicalCursor.X, savedPhysicalCursor.Y);
+        SetCursorPos(physicalCursor.X, physicalCursor.Y);
       }
       redirectingRealInput = false;
       softwareCursor.Hide();
@@ -1359,6 +1438,14 @@ namespace InfiniteDeskPreview {
       }
       restoreChordDown = restoreChord;
 
+      if (pendingAutoInputs.Count > 0 && (DateTime.UtcNow - pendingAutoInputSinceUtc).TotalSeconds > 5) {
+        CancelPendingAutoInput();
+      }
+
+      if (realInputEnabled && !redirectingRealInput && pendingAutoInputs.Count > 0) {
+        ActivatePendingAutoInput();
+      }
+
       if (!redirectingRealInput) {
         return;
       }
@@ -1370,6 +1457,11 @@ namespace InfiniteDeskPreview {
       Rect latestBounds;
       if (DwmGetWindowAttribute(sourceHwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out latestBounds, Marshal.SizeOf(typeof(Rect))) == 0 &&
           latestBounds.right - latestBounds.left > 1 && latestBounds.bottom - latestBounds.top > 1) {
+        Rectangle targetScreenBounds = Screen.FromHandle(sourceHwnd).Bounds;
+        latestBounds.left = Math.Max(latestBounds.left, targetScreenBounds.Left);
+        latestBounds.top = Math.Max(latestBounds.top, targetScreenBounds.Top);
+        latestBounds.right = Math.Min(latestBounds.right, targetScreenBounds.Right);
+        latestBounds.bottom = Math.Min(latestBounds.bottom, targetScreenBounds.Bottom);
         realInputTargetBounds = latestBounds;
         ClipCursor(ref realInputTargetBounds);
       }
@@ -1385,13 +1477,68 @@ namespace InfiniteDeskPreview {
         return;
       }
 
+      // The real pointer travels across the full-size virtual window while the
+      // user sees a scaled DWM preview. Compensate for that scale so one pixel
+      // of normal Windows pointer movement feels like roughly one preview
+      // pixel, even as the InfiniteDesk camera zoom changes.
+      int rawDeltaX = actual.X - lastRealInputCursor.X;
+      int rawDeltaY = actual.Y - lastRealInputCursor.Y;
+      if (rawDeltaX != 0 || rawDeltaY != 0) {
+        double scaleX = Math.Max(0.25, Math.Min(4.0,
+          targetWidth * currentSourceCrop.Width / Math.Max(1.0, ClientSize.Width - 1.0)));
+        double scaleY = Math.Max(0.25, Math.Min(4.0,
+          targetHeight * currentSourceCrop.Height / Math.Max(1.0, ClientSize.Height - 1.0)));
+        double scaledDeltaX = rawDeltaX * scaleX + cursorScaleRemainderX;
+        double scaledDeltaY = rawDeltaY * scaleY + cursorScaleRemainderY;
+        int adjustedDeltaX = (int)Math.Round(scaledDeltaX, MidpointRounding.AwayFromZero);
+        int adjustedDeltaY = (int)Math.Round(scaledDeltaY, MidpointRounding.AwayFromZero);
+        cursorScaleRemainderX = scaledDeltaX - adjustedDeltaX;
+        cursorScaleRemainderY = scaledDeltaY - adjustedDeltaY;
+
+        int adjustedX = Math.Max(realInputTargetBounds.left,
+          Math.Min(realInputTargetBounds.right - 1, lastRealInputCursor.X + adjustedDeltaX));
+        int adjustedY = Math.Max(realInputTargetBounds.top,
+          Math.Min(realInputTargetBounds.bottom - 1, lastRealInputCursor.Y + adjustedDeltaY));
+        if (adjustedX == realInputTargetBounds.left || adjustedX == realInputTargetBounds.right - 1) {
+          cursorScaleRemainderX = 0;
+        }
+        if (adjustedY == realInputTargetBounds.top || adjustedY == realInputTargetBounds.bottom - 1) {
+          cursorScaleRemainderY = 0;
+        }
+        if (adjustedX != actual.X || adjustedY != actual.Y) {
+          SetCursorPos(adjustedX, adjustedY);
+          actual = new Point(adjustedX, adjustedY);
+        }
+      }
+      lastRealInputCursor = actual;
+
       double sourceX = Math.Max(0.0, Math.Min(1.0, (double)(actual.X - realInputTargetBounds.left) / targetWidth));
       double sourceY = Math.Max(0.0, Math.Min(1.0, (double)(actual.Y - realInputTargetBounds.top) / targetHeight));
       double localX = Math.Max(0.0, Math.Min(1.0, (sourceX - currentSourceCrop.X) / currentSourceCrop.Width));
       double localY = Math.Max(0.0, Math.Min(1.0, (sourceY - currentSourceCrop.Y) / currentSourceCrop.Height));
       int displayX = Left + (int)Math.Round(localX * Math.Max(1, ClientSize.Width - 1));
       int displayY = Top + (int)Math.Round(localY * Math.Max(1, ClientSize.Height - 1));
-      softwareCursor.MoveCenter(displayX, displayY);
+      bool atLeftEdge = actual.X <= realInputTargetBounds.left;
+      bool atRightEdge = actual.X >= realInputTargetBounds.right - 1;
+      bool atTopEdge = actual.Y <= realInputTargetBounds.top;
+      bool atBottomEdge = actual.Y >= realInputTargetBounds.bottom - 1;
+      if (atLeftEdge || atRightEdge || atTopEdge || atBottomEdge) {
+        Point exitPoint = new Point(
+          atLeftEdge ? Left - 3 : atRightEdge ? Right + 3 : displayX,
+          atTopEdge ? Top - 3 : atBottomEdge ? Bottom + 3 : displayY
+        );
+        ExitRealInput(exitPoint);
+        return;
+      }
+      CursorInfo cursorInfo = new CursorInfo();
+      cursorInfo.cbSize = Marshal.SizeOf(typeof(CursorInfo));
+      if (GetCursorInfo(ref cursorInfo) && (cursorInfo.flags & CURSOR_SHOWING) != 0 && cursorInfo.hCursor != IntPtr.Zero) {
+        softwareCursor.SetCursorShape(cursorInfo.hCursor);
+        softwareCursor.ShowInactive();
+        softwareCursor.MoveHotspot(displayX, displayY);
+      } else {
+        softwareCursor.Hide();
+      }
     }
 
     protected override void OnMouseDown(MouseEventArgs eventArgs) {
@@ -1403,11 +1550,15 @@ namespace InfiniteDeskPreview {
       pressedButton = GetButtonName(eventArgs.Button);
       pointerIsDown = true;
       Capture = true;
-      RelayMouse(eventArgs, "down", pressedButton);
+      UpdateLastNormalizedPoint(eventArgs.Location);
     }
 
     protected override void OnMouseMove(MouseEventArgs eventArgs) {
       if (redirectingRealInput) {
+        return;
+      }
+      if (pointerIsDown) {
+        UpdateLastNormalizedPoint(eventArgs.Location);
         return;
       }
       RelayMouse(eventArgs, "move", pointerIsDown ? pressedButton : GetButtonName(eventArgs.Button));
@@ -1419,11 +1570,19 @@ namespace InfiniteDeskPreview {
         Capture = false;
         return;
       }
-      RelayMouse(eventArgs, "up", GetButtonName(eventArgs.Button));
+      UpdateLastNormalizedPoint(eventArgs.Location);
+      QueueAutoInput(new PendingAutoInput {
+        kind = "click",
+        normalizedX = lastNormalizedX,
+        normalizedY = lastNormalizedY,
+        button = GetButtonName(eventArgs.Button),
+        clickCount = Math.Max(1, Math.Min(2, eventArgs.Clicks)),
+        shiftKey = (Control.ModifierKeys & Keys.Shift) == Keys.Shift,
+        ctrlKey = (Control.ModifierKeys & Keys.Control) == Keys.Control,
+        altKey = (Control.ModifierKeys & Keys.Alt) == Keys.Alt
+      });
       pointerIsDown = false;
       Capture = false;
-      Console.Out.WriteLine("{\"event\":\"interaction\",\"hwnd\":\"" + HwndToString(sourceHwnd) + "\"}");
-      Console.Out.Flush();
     }
 
     protected override void OnMouseWheel(MouseEventArgs eventArgs) {
@@ -1432,7 +1591,17 @@ namespace InfiniteDeskPreview {
         return;
       }
       NativePointerRelay.KeepControllerAbove(ownerHwnd);
-      RelayMouse(eventArgs, "wheel", "left");
+      UpdateLastNormalizedPoint(eventArgs.Location);
+      QueueAutoInput(new PendingAutoInput {
+        kind = "wheel",
+        normalizedX = lastNormalizedX,
+        normalizedY = lastNormalizedY,
+        button = "left",
+        wheelDelta = eventArgs.Delta,
+        shiftKey = (Control.ModifierKeys & Keys.Shift) == Keys.Shift,
+        ctrlKey = (Control.ModifierKeys & Keys.Control) == Keys.Control,
+        altKey = (Control.ModifierKeys & Keys.Alt) == Keys.Alt
+      });
     }
 
     public void RelayWheelAtScreenPoint(
@@ -1453,24 +1622,135 @@ namespace InfiniteDeskPreview {
         return;
       }
       NativePointerRelay.KeepControllerAbove(ownerHwnd);
-      double localX = Math.Max(0.0, Math.Min(1.0, (double)clientPoint.X / Math.Max(1, ClientSize.Width - 1)));
-      double localY = Math.Max(0.0, Math.Min(1.0, (double)clientPoint.Y / Math.Max(1, ClientSize.Height - 1)));
-      lastNormalizedX = currentSourceCrop.X + localX * currentSourceCrop.Width;
-      lastNormalizedY = currentSourceCrop.Y + localY * currentSourceCrop.Height;
-      NativePointerRelay.Relay(new PointerInputItem {
-        hwnd = HwndToString(sourceHwnd),
+      UpdateLastNormalizedPoint(clientPoint);
+      QueueAutoInput(new PendingAutoInput {
+        kind = "wheel",
         normalizedX = lastNormalizedX,
         normalizedY = lastNormalizedY,
-        phase = "wheel",
         button = "left",
-        buttons = 0,
         wheelDelta = horizontal ? 0 : delta,
         wheelDeltaX = horizontal ? delta : 0,
         shiftKey = shiftKey,
         ctrlKey = ctrlKey,
-        altKey = altKey,
-        controllerHwnd = HwndToString(ownerHwnd)
+        altKey = altKey
       });
+    }
+
+    private void UpdateLastNormalizedPoint(Point clientPoint) {
+      double localX = Math.Max(0.0, Math.Min(1.0, (double)clientPoint.X / Math.Max(1, ClientSize.Width - 1)));
+      double localY = Math.Max(0.0, Math.Min(1.0, (double)clientPoint.Y / Math.Max(1, ClientSize.Height - 1)));
+      lastNormalizedX = currentSourceCrop.X + localX * currentSourceCrop.Width;
+      lastNormalizedY = currentSourceCrop.Y + localY * currentSourceCrop.Height;
+    }
+
+    private void QueueAutoInput(PendingAutoInput input) {
+      if (sourceHwnd == IntPtr.Zero || input == null) {
+        return;
+      }
+      if (pendingAutoInputs.Count == 0) {
+        pendingAutoInputSinceUtc = DateTime.UtcNow;
+      }
+      if (input.kind == "wheel" && pendingAutoInputs.Count > 0) {
+        PendingAutoInput latest = pendingAutoInputs[pendingAutoInputs.Count - 1];
+        if (latest.kind == "wheel" && latest.shiftKey == input.shiftKey && latest.ctrlKey == input.ctrlKey && latest.altKey == input.altKey) {
+          latest.normalizedX = input.normalizedX;
+          latest.normalizedY = input.normalizedY;
+          latest.wheelDelta += input.wheelDelta;
+          latest.wheelDeltaX += input.wheelDeltaX;
+        } else if (pendingAutoInputs.Count < 8) {
+          pendingAutoInputs.Add(input);
+        }
+      } else if (pendingAutoInputs.Count < 8) {
+        pendingAutoInputs.Add(input);
+      }
+      if (!autoAttachRequestSent) {
+        autoAttachRequestSent = true;
+        Console.Out.WriteLine("{\"event\":\"auto-attach-request\",\"hwnd\":\"" + HwndToString(sourceHwnd) + "\"}");
+        Console.Out.Flush();
+      }
+    }
+
+    public void CancelPendingAutoInput() {
+      pendingAutoInputs.Clear();
+      autoAttachRequestSent = false;
+      pendingAutoInputSinceUtc = DateTime.MinValue;
+    }
+
+    public void ActivatePendingAutoInput() {
+      if (!realInputEnabled || pendingAutoInputs.Count == 0 || currentSourceCrop.Width <= 0 || currentSourceCrop.Height <= 0) {
+        return;
+      }
+      PendingAutoInput first = pendingAutoInputs[0];
+      double localX = Math.Max(0.0, Math.Min(1.0, (first.normalizedX - currentSourceCrop.X) / currentSourceCrop.Width));
+      double localY = Math.Max(0.0, Math.Min(1.0, (first.normalizedY - currentSourceCrop.Y) / currentSourceCrop.Height));
+      Point previewPoint = new Point(
+        (int)Math.Round(localX * Math.Max(1, ClientSize.Width - 1)),
+        (int)Math.Round(localY * Math.Max(1, ClientSize.Height - 1))
+      );
+      if (!EnterRealInput(previewPoint)) {
+        return;
+      }
+
+      List<PendingAutoInput> replay = new List<PendingAutoInput>(pendingAutoInputs);
+      CancelPendingAutoInput();
+      foreach (PendingAutoInput input in replay) {
+        ReplayAutoInput(input);
+      }
+      Console.Out.WriteLine("{\"event\":\"interaction\",\"hwnd\":\"" + HwndToString(sourceHwnd) + "\"}");
+      Console.Out.Flush();
+    }
+
+    private static void ReplayAutoInput(PendingAutoInput input) {
+      bool pressedShift = PressModifierIfNeeded(VK_SHIFT, input.shiftKey);
+      bool pressedControl = PressModifierIfNeeded(VK_CONTROL, input.ctrlKey);
+      bool pressedAlt = PressModifierIfNeeded(VK_MENU, input.altKey);
+      try {
+        if (input.kind == "wheel") {
+          if (input.wheelDelta != 0) {
+            mouse_event(MOUSEEVENTF_WHEEL, 0, 0, unchecked((uint)input.wheelDelta), UIntPtr.Zero);
+          }
+          if (input.wheelDeltaX != 0) {
+            mouse_event(MOUSEEVENTF_HWHEEL, 0, 0, unchecked((uint)input.wheelDeltaX), UIntPtr.Zero);
+          }
+          return;
+        }
+
+        uint down = MOUSEEVENTF_LEFTDOWN;
+        uint up = MOUSEEVENTF_LEFTUP;
+        if (input.button == "right") {
+          down = MOUSEEVENTF_RIGHTDOWN;
+          up = MOUSEEVENTF_RIGHTUP;
+        } else if (input.button == "middle") {
+          down = MOUSEEVENTF_MIDDLEDOWN;
+          up = MOUSEEVENTF_MIDDLEUP;
+        }
+        int count = Math.Max(1, Math.Min(2, input.clickCount));
+        for (int index = 0; index < count; index++) {
+          mouse_event(down, 0, 0, 0, UIntPtr.Zero);
+          mouse_event(up, 0, 0, 0, UIntPtr.Zero);
+          if (index + 1 < count) {
+            Thread.Sleep(40);
+          }
+        }
+      } finally {
+        ReleaseModifierIfPressed(VK_MENU, pressedAlt);
+        ReleaseModifierIfPressed(VK_CONTROL, pressedControl);
+        ReleaseModifierIfPressed(VK_SHIFT, pressedShift);
+      }
+    }
+
+    private static bool PressModifierIfNeeded(int virtualKey, bool needed) {
+      if (!needed || (GetAsyncKeyState(virtualKey) & 0x8000) != 0) {
+        return false;
+      }
+      keybd_event((byte)virtualKey, 0, 0, UIntPtr.Zero);
+      return true;
+    }
+
+    private static void ReleaseModifierIfPressed(int virtualKey, bool pressed) {
+      if (pressed) {
+        keybd_event((byte)virtualKey, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+      }
     }
 
     protected override void OnMouseCaptureChanged(EventArgs eventArgs) {
@@ -1539,6 +1819,8 @@ namespace InfiniteDeskPreview {
 
     public void HidePreview() {
       ExitRealInput();
+      CancelPendingAutoInput();
+      previewSuspended = false;
       desiredSourceHwnd = IntPtr.Zero;
       HideWindowOnly();
     }
@@ -1573,13 +1855,55 @@ namespace InfiniteDeskPreview {
   }
 
   public sealed class SoftwareCursorForm : Form {
+    private const int DI_NORMAL = 0x0003;
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOMOVE = 0x0002;
+    private const uint SWP_NOACTIVATE = 0x0010;
+    private const uint SWP_SHOWWINDOW = 0x0040;
+    private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    private IntPtr cursorHandle = IntPtr.Zero;
+    private int hotspotX;
+    private int hotspotY;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IconInfo {
+      [MarshalAs(UnmanagedType.Bool)]
+      public bool isIcon;
+      public int hotspotX;
+      public int hotspotY;
+      public IntPtr maskBitmap;
+      public IntPtr colorBitmap;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool GetIconInfo(IntPtr icon, out IconInfo iconInfo);
+
+    [DllImport("user32.dll")]
+    private static extern bool DrawIconEx(
+      IntPtr deviceContext,
+      int x,
+      int y,
+      IntPtr icon,
+      int width,
+      int height,
+      int animationStep,
+      IntPtr flickerFreeBrush,
+      int flags
+    );
+
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteObject(IntPtr value);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+
     public SoftwareCursorForm() {
       FormBorderStyle = FormBorderStyle.None;
       ShowInTaskbar = false;
       TopMost = true;
       BackColor = Color.Magenta;
       TransparencyKey = Color.Magenta;
-      Size = new Size(22, 22);
+      Size = new Size(96, 96);
     }
 
     protected override bool ShowWithoutActivation {
@@ -1598,24 +1922,68 @@ namespace InfiniteDeskPreview {
     }
 
     protected override void OnPaint(PaintEventArgs eventArgs) {
-      eventArgs.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-      using (Brush fill = new SolidBrush(Color.FromArgb(245, 158, 11)))
-      using (Pen outline = new Pen(Color.White, 2.0f)) {
-        eventArgs.Graphics.FillEllipse(fill, 3, 3, 14, 14);
-        eventArgs.Graphics.DrawEllipse(outline, 3, 3, 14, 14);
-        eventArgs.Graphics.DrawLine(outline, 10, 0, 10, 20);
-        eventArgs.Graphics.DrawLine(outline, 0, 10, 20, 10);
+      if (cursorHandle == IntPtr.Zero) {
+        return;
       }
+      IntPtr deviceContext = eventArgs.Graphics.GetHdc();
+      try {
+        DrawIconEx(deviceContext, 0, 0, cursorHandle, 0, 0, 0, IntPtr.Zero, DI_NORMAL);
+      } finally {
+        eventArgs.Graphics.ReleaseHdc(deviceContext);
+      }
+    }
+
+    public void SetCursorShape(IntPtr nextCursorHandle) {
+      if (nextCursorHandle == IntPtr.Zero || nextCursorHandle == cursorHandle) {
+        return;
+      }
+
+      cursorHandle = nextCursorHandle;
+      IconInfo iconInfo;
+      if (GetIconInfo(cursorHandle, out iconInfo)) {
+        hotspotX = Math.Max(0, iconInfo.hotspotX);
+        hotspotY = Math.Max(0, iconInfo.hotspotY);
+        if (iconInfo.maskBitmap != IntPtr.Zero) {
+          DeleteObject(iconInfo.maskBitmap);
+        }
+        if (iconInfo.colorBitmap != IntPtr.Zero) {
+          DeleteObject(iconInfo.colorBitmap);
+        }
+      } else {
+        hotspotX = 0;
+        hotspotY = 0;
+      }
+      Invalidate();
     }
 
     public void ShowInactive() {
       if (!Visible) {
         Show();
       }
+      // Preview forms are frequently reordered to follow the Electron owner.
+      // Reassert the cursor at the top of the non-activating topmost band so a
+      // later DWM preview sync cannot cover it.
+      SetWindowPos(
+        Handle,
+        HWND_TOPMOST,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW
+      );
     }
 
-    public void MoveCenter(int x, int y) {
-      Location = new Point(x - Width / 2, y - Height / 2);
+    public void MoveHotspot(int x, int y) {
+      SetWindowPos(
+        Handle,
+        HWND_TOPMOST,
+        x - hotspotX,
+        y - hotspotY,
+        0,
+        0,
+        SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW
+      );
     }
   }
 
@@ -1713,8 +2081,52 @@ namespace InfiniteDeskPreview {
           if (!form.IsDisposed && form.SourceHwnd == source) {
             form.SetRealInputEnabled(enabled);
             if (enabled) {
-              form.RefreshPreviewRegistration();
+              form.ResumePreview();
+              form.ActivatePendingAutoInput();
             }
+          }
+        }
+        return;
+      }
+
+      if (action == "suspend-source" || action == "resume-source") {
+        IntPtr source = ParseHwnd(command.hwnd);
+        if (source == IntPtr.Zero) {
+          return;
+        }
+        foreach (PreviewForm form in forms.Values) {
+          if (!form.IsDisposed && form.SourceHwnd == source) {
+            if (action == "suspend-source") {
+              form.SuspendPreview();
+            } else {
+              form.ResumePreview();
+            }
+          }
+        }
+        return;
+      }
+
+      if (action == "cancel-auto-input") {
+        IntPtr source = ParseHwnd(command.hwnd);
+        if (source == IntPtr.Zero) {
+          return;
+        }
+        foreach (PreviewForm form in forms.Values) {
+          if (!form.IsDisposed && form.SourceHwnd == source) {
+            form.CancelPendingAutoInput();
+          }
+        }
+        return;
+      }
+
+      if (action == "refresh-source") {
+        IntPtr source = ParseHwnd(command.hwnd);
+        if (source == IntPtr.Zero) {
+          return;
+        }
+        foreach (PreviewForm form in forms.Values) {
+          if (!form.IsDisposed && form.SourceHwnd == source) {
+            form.RefreshPreviewRegistration();
           }
         }
         return;

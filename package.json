@@ -17,10 +17,11 @@
   "scripts": {
     "dev": "set ELECTRON_RUN_AS_NODE=&& electron-vite dev",
     "build": "tsc --noEmit && electron-vite build",
+    "build:virtual-display": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\native\\virtual-display\\build.ps1 -Configuration Release",
     "preview": "electron-vite preview",
-    "package:dir": "npm run build && electron-builder --win dir --x64",
-    "package:win": "npm run build && electron-builder --win nsis --x64",
-    "package:portable": "npm run build && electron-builder --win portable --x64",
+    "package:dir": "npm run build:virtual-display && npm run build && electron-builder --win dir --x64",
+    "package:win": "npm run build:virtual-display && npm run build && electron-builder --win nsis --x64",
+    "package:portable": "npm run build:virtual-display && npm run build && electron-builder --win portable --x64",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

@@ -18,6 +18,8 @@ extraResources:
     to: dwm-preview-host.ps1
   - from: src/main/window-control-host.ps1
     to: window-control-host.ps1
+  - from: native/virtual-display/x64/Release/InfiniteDeskVirtualDisplayHost.exe
+    to: InfiniteDeskVirtualDisplayHost.exe
   - from: NOTICE.md
     to: NOTICE.md
   - from: PRIVACY.md

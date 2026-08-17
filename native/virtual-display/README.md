@@ -13,7 +13,8 @@ The prototype exists to validate this architecture:
 5. The target receives genuine mouse, wheel, modifier, and keyboard input.
 
 The driver exposes one monitor and the companion host creates a removable software device.
-Closing the host removes that device for the current session.
+The host runs as a single-instance background process without a console window. InfiniteDesk
+starts it automatically when the installed virtual monitor is not already active.
 
 ## Requirements
 
@@ -41,7 +42,8 @@ signing takes effect only after restarting Windows.
     .\native\virtual-display\install-test-driver.ps1
     .\native\virtual-display\x64\Debug\InfiniteDeskVirtualDisplayHost.exe
 
-Press X in the host console to remove the software monitor for the current session.
+The host has no visible window. End `InfiniteDeskVirtualDisplayHost.exe` from Task Manager only
+when intentionally removing the software monitor for the current session.
 
 To remove the package and return Windows to its normal signing policy:
 

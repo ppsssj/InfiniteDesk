@@ -95,7 +95,6 @@ export function CanvasPreview({
     [canvasWindowEntries]
   );
   const shouldSuspendNativePreviews = false;
-  const isInteractiveCameraLocked = embeddedWindowIds.length > 0;
 
   const viewportVersion = useViewportVersion(canvasRef);
 
@@ -108,7 +107,6 @@ export function CanvasPreview({
     zoomInSignal,
     zoomOutSignal,
     actualSizeSignal,
-    locked: isInteractiveCameraLocked,
     onZoomChange
   });
 
@@ -168,9 +166,6 @@ export function CanvasPreview({
 
   function animateCameraTo(targetTransform: CanvasTransform): void {
     cancelCameraAnimation();
-    if (isInteractiveCameraLocked) {
-      return;
-    }
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
       transformRef.current = targetTransform;
       setTransform(targetTransform);
@@ -527,7 +522,7 @@ export function CanvasPreview({
       };
       setSelectionRect({ x: worldPoint.x, y: worldPoint.y, width: 0, height: 0 });
       setDragMode('select-windows');
-    } else if (!isInteractiveCameraLocked) {
+    } else {
       onSelectWindowKeys([]);
       startPanDrag(event, event.currentTarget);
     }
@@ -672,9 +667,6 @@ export function CanvasPreview({
   function handleWheel(event: React.WheelEvent<HTMLDivElement>): void {
     cancelCameraAnimation();
     event.preventDefault();
-    if (isInteractiveCameraLocked) {
-      return;
-    }
     if (event.shiftKey) {
       setTransform((current) => ({
         ...current,

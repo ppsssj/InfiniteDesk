@@ -48,6 +48,7 @@ import {
 import { createWindow, fitBrowserWindowToDisplay } from './browser-window';
 import { nativeWindowHandleToString } from './win32';
 import { handleTrusted } from './security';
+import { ensureVirtualDisplayHost } from './virtual-display-host';
 
 let overlayRestoreBounds: Rectangle | null = null;
 let isQuittingAfterDetach = false;
@@ -446,7 +447,15 @@ handleTrusted('window:detach-embedded', async (event, hwnd: string): Promise<Emb
   }
 
   const result = await detachWindowFromVirtualDisplay(hwnd);
-  syncEmbeddedShortcuts(getControllerWindow(event));
+  const controllerWindow = getControllerWindow(event);
+  syncEmbeddedShortcuts(controllerWindow);
+  if (result.success && controllerWindow && !controllerWindow.isDestroyed()) {
+    if (controllerWindow.isMinimized()) {
+      controllerWindow.restore();
+    }
+    controllerWindow.show();
+    controllerWindow.focus();
+  }
   return result;
 });
 
@@ -484,6 +493,13 @@ handleTrusted('dwm:sync-previews', (event, previews: DwmPreviewWindow[]): DwmPre
 
 handleTrusted('dwm:clear-previews', (): DwmPreviewResult => {
   return sendDwmPreviewCommand({ action: 'clear' });
+});
+
+handleTrusted('dwm:cancel-auto-input', (_event, hwnd: string): DwmPreviewResult => {
+  if (isBlankHwnd(hwnd)) {
+    return { success: false, error: 'No HWND was provided.' };
+  }
+  return sendDwmPreviewCommand({ action: 'cancel-auto-input', hwnd });
 });
 
 handleTrusted('dock:list-apps', async (): Promise<DockApp[]> => {
@@ -596,6 +612,7 @@ handleTrusted('quick-launches:delete', async (_event, id: string): Promise<Quick
 });
 
 app.whenReady().then(() => {
+  ensureVirtualDisplayHost();
   // Start the native preview host while the renderer is loading so the first
   // real-window preview does not pay the PowerShell/WinForms cold-start cost.
   sendDwmPreviewCommand({ action: 'hide' });

@@ -31,9 +31,21 @@ type VirtualizedWindow = {
 
 const virtualizedWindows = new Map<string, VirtualizedWindow>();
 const pendingVirtualAttaches = new Map<string, Promise<EmbedResult>>();
+const PREVIEW_TRANSITION_GUARD_MS = 34;
 
 function normalizedHwnd(hwnd: string): string {
   return hwnd.trim().toLowerCase();
+}
+
+async function suspendPreviewForTransition(hwnd: string): Promise<void> {
+  const result = sendDwmPreviewCommand({ action: 'suspend-source', hwnd });
+  if (result.success) {
+    await new Promise((resolve) => setTimeout(resolve, PREVIEW_TRANSITION_GUARD_MS));
+  }
+}
+
+function resumePreviewAfterTransition(hwnd: string): void {
+  sendDwmPreviewCommand({ action: 'resume-source', hwnd });
 }
 
 function displaySortValue(display: Display): number {
@@ -69,6 +81,9 @@ export function getVirtualizedWindowCount(): number {
 export function attachWindowToVirtualDisplay(hwnd: string): Promise<EmbedResult> {
   const key = normalizedHwnd(hwnd);
   if (virtualizedWindows.has(key)) {
+    // Re-enable the preview host as well. This consumes any first input that
+    // was queued while renderer state was catching up with native state.
+    sendDwmPreviewCommand({ action: 'enable-real-input', hwnd });
     return Promise.resolve({ success: true, hwnd });
   }
 
@@ -103,6 +118,8 @@ async function performVirtualAttach(hwnd: string, key: string): Promise<EmbedRes
       `at ${display.bounds.x},${display.bounds.y} ${display.bounds.width}x${display.bounds.height}.`
   );
 
+  await suspendPreviewForTransition(hwnd);
+
   const result = await sendWindowControlCommand<VirtualAttachHostResult>('virtualAttach', {
     hwnd,
     displayX: display.bounds.x,
@@ -112,6 +129,7 @@ async function performVirtualAttach(hwnd: string, key: string): Promise<EmbedRes
   });
 
   if (!result.success || !result.originalPlacement) {
+    resumePreviewAfterTransition(hwnd);
     return {
       success: false,
       hwnd,
@@ -125,6 +143,7 @@ async function performVirtualAttach(hwnd: string, key: string): Promise<EmbedRes
       hwnd,
       originalPlacement: result.originalPlacement
     });
+    resumePreviewAfterTransition(hwnd);
     return {
       success: false,
       hwnd,
@@ -156,12 +175,20 @@ export async function detachWindowFromVirtualDisplay(hwnd: string): Promise<Embe
   }
 
   sendDwmPreviewCommand({ action: 'disable-real-input', hwnd });
+  await suspendPreviewForTransition(hwnd);
   const result = await sendWindowControlCommand<EmbedResult>('virtualDetach', {
     hwnd,
     originalPlacement: state.originalPlacement
   });
   if (result.success) {
     virtualizedWindows.delete(key);
+    // Moving a top-level window between adapters can replace its compositor
+    // surface while leaving an existing DWM thumbnail technically valid but
+    // visually stretched or partially blank. Re-register only after the
+    // original WINDOWPLACEMENT has been restored.
+    resumePreviewAfterTransition(hwnd);
+  } else {
+    resumePreviewAfterTransition(hwnd);
   }
   return result;
 }

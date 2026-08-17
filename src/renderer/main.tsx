@@ -110,6 +110,8 @@ function App(): React.JSX.Element {
   const [embeddedWindowIds, setEmbeddedWindowIds] = useState<string[]>([]);
   const [isViewControlsExpanded, setIsViewControlsExpanded] = useState(false);
   const virtualWindowsRef = useRef<VirtualWindowState[]>([]);
+  const embeddedWindowIdsRef = useRef<string[]>([]);
+  const autoAttachQueueRef = useRef<Promise<void>>(Promise.resolve());
   const initialVirtualWindowsRef = useRef<VirtualWindowState[]>([]);
   const regionsRef = useRef<TemplateRegion[]>([]);
   const previewWorkspaceRef = useRef<SavedWorkspace | null>(null);
@@ -120,6 +122,7 @@ function App(): React.JSX.Element {
   const autoScanTimersRef = useRef<number[]>([]);
   const latestInteractionSourceRef = useRef('');
   const interactionScanGenerationRef = useRef(0);
+  const suppressedInteractionCameraUntilRef = useRef<Map<string, number>>(new Map());
   const cameraFocusRequestIdRef = useRef(0);
   const hasCompletedInitialScanRef = useRef(false);
 
@@ -346,6 +349,110 @@ function App(): React.JSX.Element {
     setMessage,
     setIsBrandMenuOpen
   });
+
+  function suppressInteractionCamera(hwnds: string[], durationMs = 2_000): void {
+    const normalizedHwnds = new Set(hwnds.filter(Boolean).map((hwnd) => hwnd.toLowerCase()));
+    if (normalizedHwnds.size === 0) {
+      return;
+    }
+    const suppressedUntil = Date.now() + durationMs;
+    for (const hwnd of normalizedHwnds) {
+      suppressedInteractionCameraUntilRef.current.set(hwnd, suppressedUntil);
+    }
+    if (normalizedHwnds.has(latestInteractionSourceRef.current.toLowerCase())) {
+      autoScanTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
+      autoScanTimersRef.current = [];
+      latestInteractionSourceRef.current = '';
+      interactionScanGenerationRef.current += 1;
+    }
+  }
+
+  function isInteractionCameraSuppressed(hwnd: string): boolean {
+    const normalizedHwnd = hwnd.toLowerCase();
+    const suppressedUntil = suppressedInteractionCameraUntilRef.current.get(normalizedHwnd) || 0;
+    if (suppressedUntil <= Date.now()) {
+      suppressedInteractionCameraUntilRef.current.delete(normalizedHwnd);
+      return false;
+    }
+    return true;
+  }
+
+  function queueInteractiveSwitch(target: VirtualWindowState, cancelPendingInput: boolean): void {
+    if (!target.hwnd) {
+      return;
+    }
+    const targetHwnd = target.hwnd;
+    const normalizedTarget = targetHwnd.toLowerCase();
+    autoAttachQueueRef.current = autoAttachQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const previouslyAttached = embeddedWindowIdsRef.current.filter(
+          (hwnd) => hwnd.toLowerCase() !== normalizedTarget
+        );
+        suppressInteractionCamera(previouslyAttached);
+
+        for (const attachedHwnd of previouslyAttached) {
+          const detachResult = await window.infiniteDesk.detachEmbeddedWindow(attachedHwnd);
+          if (!detachResult.success) {
+            if (cancelPendingInput) {
+              await window.infiniteDesk.cancelAutoInput(targetHwnd);
+            }
+            setError(detachResult.error || 'Could not switch the active live-input window.');
+            return;
+          }
+          embeddedWindowIdsRef.current = embeddedWindowIdsRef.current.filter(
+            (candidate) => candidate.toLowerCase() !== attachedHwnd.toLowerCase()
+          );
+          setEmbeddedWindowIds([...embeddedWindowIdsRef.current]);
+        }
+
+        const attachResult = await window.infiniteDesk.embedWindowToHost({
+          hwnd: targetHwnd,
+          x: 0,
+          y: 0,
+          width: Math.max(1, target.width),
+          height: Math.max(1, target.height)
+        });
+        if (!attachResult.success) {
+          if (cancelPendingInput) {
+            await window.infiniteDesk.cancelAutoInput(targetHwnd);
+          }
+          setError(attachResult.error || `Could not enable live input for ${target.title}.`);
+          return;
+        }
+
+        embeddedWindowIdsRef.current = [targetHwnd];
+        setEmbeddedWindowIds([targetHwnd]);
+        setError(null);
+        setMessage(`Live input switched to "${target.title}".`);
+      })
+      .catch(async (switchError) => {
+        if (cancelPendingInput) {
+          await window.infiniteDesk.cancelAutoInput(targetHwnd).catch(() => undefined);
+        }
+        setError((switchError as Error).message);
+      });
+  }
+
+  function queueInteractiveDetach(hwnd: string): void {
+    autoAttachQueueRef.current = autoAttachQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        suppressInteractionCamera([hwnd]);
+        const result = await window.infiniteDesk.detachEmbeddedWindow(hwnd);
+        if (!result.success) {
+          setError(result.error || 'Could not detach the live-input window.');
+          return;
+        }
+        embeddedWindowIdsRef.current = embeddedWindowIdsRef.current.filter(
+          (candidate) => candidate.toLowerCase() !== hwnd.toLowerCase()
+        );
+        setEmbeddedWindowIds([...embeddedWindowIdsRef.current]);
+        setError(null);
+        setMessage('Live input detached and the real window was restored.');
+      })
+      .catch((detachError) => setError((detachError as Error).message));
+  }
 
   async function loadWorkspaces(): Promise<void> {
     const loaded = await window.infiniteDesk.listWorkspaces();
@@ -691,7 +798,9 @@ function App(): React.JSX.Element {
       }
       if (newDetectedWindows.length === 0) {
         if (sourceHwnd && existingTargetHwnd) {
-          focusCameraOnWindow(existingTargetHwnd);
+          if (!isInteractionCameraSuppressed(existingTargetHwnd)) {
+            focusCameraOnWindow(existingTargetHwnd);
+          }
           const target = detected.find((windowInfo) => windowInfo.hwnd.toLowerCase() === existingTargetHwnd.toLowerCase());
           setMessage(`${target?.processName || 'An existing window'} received new activity.`);
           return 1;
@@ -742,6 +851,9 @@ function App(): React.JSX.Element {
   }
 
   function scheduleNewWindowScans(sourceHwnd: string): void {
+    if (sourceHwnd && isInteractionCameraSuppressed(sourceHwnd)) {
+      return;
+    }
     latestInteractionSourceRef.current = sourceHwnd;
     if (autoScanTimersRef.current.length > 0) {
       return;
@@ -888,6 +1000,10 @@ function App(): React.JSX.Element {
   }, [virtualWindows]);
 
   useEffect(() => {
+    embeddedWindowIdsRef.current = embeddedWindowIds;
+  }, [embeddedWindowIds]);
+
+  useEffect(() => {
     initialVirtualWindowsRef.current = initialVirtualWindows;
   }, [initialVirtualWindows]);
 
@@ -906,7 +1022,7 @@ function App(): React.JSX.Element {
   useEffect(() => {
     const unsubscribeInteraction = window.infiniteDesk.onWindowInteractionComplete((sourceHwnd) => {
       acknowledgeWindowActivity(sourceHwnd);
-      if (previewWorkspace) {
+      if (previewWorkspace || isInteractionCameraSuppressed(sourceHwnd)) {
         return;
       }
       scheduleNewWindowScans(sourceHwnd);
@@ -922,6 +1038,22 @@ function App(): React.JSX.Element {
       autoScanTimersRef.current = [];
     };
   }, [previewWorkspace]);
+
+  useEffect(() => {
+    const unsubscribeAutoAttach = window.infiniteDesk.onAutoAttachRequest((sourceHwnd) => {
+      const normalizedSource = sourceHwnd.toLowerCase();
+      const target = virtualWindowsRef.current.find(
+        (windowInfo) => windowInfo.hwnd?.toLowerCase() === normalizedSource
+      );
+      if (!target?.hwnd) {
+        void window.infiniteDesk.cancelAutoInput(sourceHwnd);
+        return;
+      }
+      queueInteractiveSwitch(target, true);
+    });
+
+    return unsubscribeAutoAttach;
+  }, []);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
@@ -944,15 +1076,23 @@ function App(): React.JSX.Element {
 
       const embeddedSet = new Set(embeddedWindowIds.map((hwnd) => hwnd.toLowerCase()));
       const selectedSet = new Set(selectedWindowKeys);
-      const selectedEmbeddedHwnd = virtualWindows.find(
+      const selectedWindow = virtualWindows.find(
         (windowInfo, index) =>
           Boolean(windowInfo.hwnd) &&
-          embeddedSet.has(windowInfo.hwnd!.toLowerCase()) &&
           selectedSet.has(getWindowKey(windowInfo, index))
-      )?.hwnd;
-      const targetHwnd = selectedEmbeddedHwnd || embeddedWindowIds.at(-1);
+      );
+      if (selectedWindow?.hwnd) {
+        if (embeddedSet.has(selectedWindow.hwnd.toLowerCase())) {
+          queueInteractiveDetach(selectedWindow.hwnd);
+        } else {
+          queueInteractiveSwitch(selectedWindow, false);
+        }
+        return;
+      }
+
+      const targetHwnd = embeddedWindowIds.at(-1);
       if (targetHwnd) {
-        void detachRealWindow(targetHwnd);
+        queueInteractiveDetach(targetHwnd);
       }
     });
 
@@ -1070,8 +1210,8 @@ function App(): React.JSX.Element {
           onCanvasHistoryCheckpoint={checkpointCanvasHistory}
           onWorkWindow={(hwnd) => void workInRealWindow(hwnd)}
           onWindowCommand={(hwnd, command) => void controlRealWindow(hwnd, command)}
-          onEmbedWindow={(windowInfo, bounds) => void embedRealWindow(windowInfo, bounds)}
-          onDetachEmbeddedWindow={(hwnd) => void detachRealWindow(hwnd)}
+          onEmbedWindow={(windowInfo) => queueInteractiveSwitch(windowInfo, false)}
+          onDetachEmbeddedWindow={queueInteractiveDetach}
           onMoveEmbeddedWindow={(params) => void moveEmbeddedWindow(params)}
           onSyncDwmPreviews={(previews) => void syncDwmPreviews(previews)}
           onClearDwmPreviews={() => void clearDwmPreviews()}
