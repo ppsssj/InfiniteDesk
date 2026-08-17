@@ -7,6 +7,10 @@ const isDev = !app.isPackaged;
 
 const MIN_WINDOW_WIDTH = 720;
 const MIN_WINDOW_HEIGHT = 480;
+// Chromium stops painting windows that it believes are fully covered by an
+// opaque native window. A one-step Windows alpha reduction is visually
+// imperceptible but keeps InfiniteDesk out of that occlusion path.
+const WINDOWS_NON_OCCLUDING_OPACITY = 254 / 255;
 
 function getResponsiveWindowBounds(display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())): Rectangle {
   return { ...display.workArea };
@@ -66,6 +70,10 @@ export function createWindow(): void {
       sandbox: true
     }
   });
+
+  if (process.platform === 'win32') {
+    mainWindow.setOpacity(WINDOWS_NON_OCCLUDING_OPACITY);
+  }
 
   hardenWebContents(mainWindow.webContents);
 
