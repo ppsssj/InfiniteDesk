@@ -1,4 +1,4 @@
-import { app, BrowserWindow, screen, type IpcMainInvokeEvent, type Rectangle } from 'electron';
+import { app, BrowserWindow, globalShortcut, screen, type IpcMainInvokeEvent, type Rectangle } from 'electron';
 import type {
   ApplyLayoutInput,
   CreateTemplateInput,
@@ -38,14 +38,13 @@ import { listLocalDockApps, launchDockApp, registerLaunchableDockApps } from './
 import { sendWindowControlCommand, stopWindowControlHost } from './window-control-client';
 import { sendDwmPreviewCommand, stopDwmPreviewHost, recordDwmPreviewSync } from './dwm-preview-client';
 import {
-  normalizeEmbedBounds,
-  recordEmbeddedWindow,
-  hasEmbeddedWindow,
-  getEmbeddedWindowCount,
-  queueEmbeddedMove,
-  detachEmbeddedWindow,
-  detachAllEmbeddedWindows
-} from './embedded-windows';
+  attachWindowToVirtualDisplay,
+  detachAllVirtualizedWindows,
+  detachWindowFromVirtualDisplay,
+  getVirtualizedWindowCount,
+  hasVirtualizedWindow,
+  moveVirtualizedWindow
+} from './virtual-display-windows';
 import { createWindow, fitBrowserWindowToDisplay } from './browser-window';
 import { nativeWindowHandleToString } from './win32';
 import { handleTrusted } from './security';
@@ -53,6 +52,66 @@ import { handleTrusted } from './security';
 let overlayRestoreBounds: Rectangle | null = null;
 let isQuittingAfterDetach = false;
 let sessionQuickLaunches: QuickLaunch[] = [];
+let embeddedShortcutWindow: BrowserWindow | null = null;
+let embeddedToggleShortcutIgnoreUntil = 0;
+
+const EMBED_TOGGLE_SHORTCUT = 'Control+E';
+const EMBED_SCAN_SHORTCUT = 'Control+R';
+
+function unregisterEmbeddedShortcuts(): void {
+  if (globalShortcut.isRegistered(EMBED_TOGGLE_SHORTCUT)) {
+    globalShortcut.unregister(EMBED_TOGGLE_SHORTCUT);
+  }
+  if (globalShortcut.isRegistered(EMBED_SCAN_SHORTCUT)) {
+    globalShortcut.unregister(EMBED_SCAN_SHORTCUT);
+  }
+  embeddedShortcutWindow = null;
+  embeddedToggleShortcutIgnoreUntil = 0;
+}
+
+function syncEmbeddedShortcuts(controllerWindow?: BrowserWindow | null): void {
+  if (getVirtualizedWindowCount() === 0) {
+    unregisterEmbeddedShortcuts();
+    return;
+  }
+
+  if (controllerWindow && !controllerWindow.isDestroyed()) {
+    embeddedShortcutWindow = controllerWindow;
+  }
+
+  const sendShortcut = (action: 'toggle-embed' | 'scan'): void => {
+    const target = embeddedShortcutWindow;
+    if (!target || target.isDestroyed() || getVirtualizedWindowCount() === 0) {
+      syncEmbeddedShortcuts();
+      return;
+    }
+    target.webContents.send('windows:interactive-shortcut', action);
+  };
+
+  if (!globalShortcut.isRegistered(EMBED_TOGGLE_SHORTCUT)) {
+    // Ctrl+E is first handled by the focused renderer. Registering the global
+    // shortcut while that same physical key press is still down can replay the
+    // chord and immediately detach/reattach the window several times.
+    embeddedToggleShortcutIgnoreUntil = Date.now() + 750;
+    const registered = globalShortcut.register(EMBED_TOGGLE_SHORTCUT, () => {
+      const now = Date.now();
+      if (now < embeddedToggleShortcutIgnoreUntil) {
+        return;
+      }
+      embeddedToggleShortcutIgnoreUntil = now + 400;
+      sendShortcut('toggle-embed');
+    });
+    if (!registered) {
+      console.error(`[embed:shortcut] Could not register ${EMBED_TOGGLE_SHORTCUT}.`);
+    }
+  }
+  if (!globalShortcut.isRegistered(EMBED_SCAN_SHORTCUT)) {
+    const registered = globalShortcut.register(EMBED_SCAN_SHORTCUT, () => sendShortcut('scan'));
+    if (!registered) {
+      console.error(`[embed:shortcut] Could not register ${EMBED_SCAN_SHORTCUT}.`);
+    }
+  }
+}
 
 app.disableHardwareAcceleration();
 app.enableSandbox();
@@ -368,41 +427,16 @@ handleTrusted('window:embed', async (event, params: EmbedWindowParams): Promise<
     };
   }
 
-  const hostHwnd = params.hostHwnd && params.hostHwnd.trim().length > 0
-    ? params.hostHwnd
-    : nativeWindowHandleToString(controllerWindow.getNativeWindowHandle());
+  const result = await attachWindowToVirtualDisplay(params.hwnd);
 
-  const result = await sendWindowControlCommand<EmbedResult>('embed', {
-    hwnd: params.hwnd,
-    hostHwnd,
-    ...normalizeEmbedBounds(params)
-  });
-
-  if (
-    result.success &&
-    result.originalParentHwnd !== undefined &&
-    result.originalStyle !== undefined &&
-    result.originalExStyle !== undefined &&
-    result.originalX !== undefined &&
-    result.originalY !== undefined &&
-    result.originalWidth !== undefined &&
-    result.originalHeight !== undefined
-  ) {
-    recordEmbeddedWindow(params.hwnd, {
-      originalParentHwnd: result.originalParentHwnd,
-      originalStyle: result.originalStyle,
-      originalExStyle: result.originalExStyle,
-      originalX: result.originalX,
-      originalY: result.originalY,
-      originalWidth: result.originalWidth,
-      originalHeight: result.originalHeight
-    });
+  if (result.success) {
+    syncEmbeddedShortcuts(controllerWindow);
   }
 
   return result;
 });
 
-handleTrusted('window:detach-embedded', async (_event, hwnd: string): Promise<EmbedResult> => {
+handleTrusted('window:detach-embedded', async (event, hwnd: string): Promise<EmbedResult> => {
   if (isBlankHwnd(hwnd)) {
     return {
       success: false,
@@ -411,7 +445,9 @@ handleTrusted('window:detach-embedded', async (_event, hwnd: string): Promise<Em
     };
   }
 
-  return detachEmbeddedWindow(hwnd);
+  const result = await detachWindowFromVirtualDisplay(hwnd);
+  syncEmbeddedShortcuts(getControllerWindow(event));
+  return result;
 });
 
 handleTrusted('window:move-embedded', async (_event, params: MoveEmbeddedWindowParams): Promise<EmbedResult> => {
@@ -423,7 +459,7 @@ handleTrusted('window:move-embedded', async (_event, params: MoveEmbeddedWindowP
     };
   }
 
-  if (!hasEmbeddedWindow(params.hwnd)) {
+  if (!hasVirtualizedWindow(params.hwnd)) {
     return {
       success: false,
       hwnd: params.hwnd,
@@ -431,7 +467,7 @@ handleTrusted('window:move-embedded', async (_event, params: MoveEmbeddedWindowP
     };
   }
 
-  return queueEmbeddedMove(params);
+  return moveVirtualizedWindow(params);
 });
 
 handleTrusted('dwm:sync-previews', (event, previews: DwmPreviewWindow[]): DwmPreviewResult => {
@@ -581,20 +617,21 @@ app.whenReady().then(() => {
 });
 
 app.on('before-quit', (event) => {
+  unregisterEmbeddedShortcuts();
   stopDwmPreviewHost();
 
   if (isQuittingAfterDetach) {
     return;
   }
 
-  if (getEmbeddedWindowCount() === 0) {
+  if (getVirtualizedWindowCount() === 0) {
     stopWindowControlHost();
     return;
   }
 
   event.preventDefault();
   isQuittingAfterDetach = true;
-  void detachAllEmbeddedWindows().finally(() => {
+  void detachAllVirtualizedWindows().finally(() => {
     stopWindowControlHost();
     app.quit();
   });

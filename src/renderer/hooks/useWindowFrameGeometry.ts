@@ -1,18 +1,12 @@
 import type { RefObject } from 'react';
-import { clampScale, worldToScreen, type CanvasSafeArea, type CanvasTransform } from '../canvas/transform';
+import { worldToScreen, type CanvasTransform } from '../canvas/transform';
 import type { VirtualWindowState } from '../canvas/types';
 import type { MoveEmbeddedWindowParams } from '../../shared/types';
 import type { ScreenRect } from '../components/CanvasPreview.types';
-import { rectsIntersect, intersectRects, subtractRect, getSafeCanvasBounds } from '../components/CanvasPreview.helpers';
+import { rectsIntersect, intersectRects, subtractRect } from '../components/CanvasPreview.helpers';
 import {
-  EMBEDDED_NODE_CHROME_HEIGHT,
-  EMBEDDED_NODE_CHROME_WIDTH,
-  EMBEDDED_NODE_CONTENT_INSET_BOTTOM,
-  EMBEDDED_NODE_CONTENT_INSET_TOP,
-  EMBEDDED_NODE_CONTENT_INSET_X,
   HIDDEN_EMBEDDED_WINDOW_X,
   HIDDEN_EMBEDDED_WINDOW_Y,
-  INTERACTIVE_EMBED_SCALE,
   NATIVE_EMBEDDED_VISIBLE_SCALE,
   OVERVIEW_FRAME_BORDER_WIDTH,
   getOverviewChromeMetrics
@@ -20,7 +14,6 @@ import {
 
 export type UseWindowFrameGeometryParams = {
   canvasRef: RefObject<HTMLDivElement | null>;
-  safeArea: CanvasSafeArea;
   transform: CanvasTransform;
   embeddedWindowIdSet: Set<string>;
   shouldSuspendNativePreviews: boolean;
@@ -28,7 +21,6 @@ export type UseWindowFrameGeometryParams = {
 
 export function useWindowFrameGeometry({
   canvasRef,
-  safeArea,
   transform,
   embeddedWindowIdSet,
   shouldSuspendNativePreviews
@@ -42,7 +34,6 @@ export function useWindowFrameGeometry({
   getFrameScreenBounds: (windowInfo: VirtualWindowState, forceEmbedded?: boolean, targetTransform?: CanvasTransform) => { x: number; y: number; width: number; height: number };
   getOverviewContentScreenBounds: (windowInfo: VirtualWindowState) => { x: number; y: number; width: number; height: number };
   getEmbeddedContentBounds: (windowInfo: VirtualWindowState, forceEmbedded?: boolean, targetTransform?: CanvasTransform) => MoveEmbeddedWindowParams;
-  getInteractiveEmbedTransform: (windowInfo: VirtualWindowState) => CanvasTransform;
 } {
   function isEmbeddedWindow(windowInfo: VirtualWindowState, forceEmbedded = false): boolean {
     return forceEmbedded || Boolean(windowInfo.hwnd && embeddedWindowIdSet.has(windowInfo.hwnd));
@@ -126,17 +117,6 @@ export function useWindowFrameGeometry({
     targetTransform: CanvasTransform = transform
   ): { x: number; y: number; width: number; height: number } {
     const position = worldToScreen(windowInfo.virtualX, windowInfo.virtualY, targetTransform);
-    if (shouldShowNativeEmbeddedWindow(windowInfo, forceEmbedded, targetTransform)) {
-      const contentWidth = Math.max(1, Math.round(windowInfo.width * targetTransform.scale));
-      const contentHeight = Math.max(1, Math.round(windowInfo.height * targetTransform.scale));
-      return {
-        x: position.x,
-        y: position.y,
-        width: contentWidth + EMBEDDED_NODE_CHROME_WIDTH,
-        height: contentHeight + EMBEDDED_NODE_CHROME_HEIGHT
-      };
-    }
-
     const contentSize = getAspectPreservingOverviewContentSize(windowInfo, targetTransform);
     const chrome = getOverviewChromeMetrics(targetTransform.scale);
 
@@ -148,10 +128,13 @@ export function useWindowFrameGeometry({
     };
   }
 
-  function getOverviewContentScreenBounds(windowInfo: VirtualWindowState): { x: number; y: number; width: number; height: number } {
-    const frame = getFrameScreenBounds(windowInfo);
-    const contentSize = getAspectPreservingOverviewContentSize(windowInfo);
-    const chrome = getOverviewChromeMetrics(transform.scale);
+  function getOverviewContentScreenBounds(
+    windowInfo: VirtualWindowState,
+    targetTransform: CanvasTransform = transform
+  ): { x: number; y: number; width: number; height: number } {
+    const frame = getFrameScreenBounds(windowInfo, false, targetTransform);
+    const contentSize = getAspectPreservingOverviewContentSize(windowInfo, targetTransform);
+    const chrome = getOverviewChromeMetrics(targetTransform.scale);
 
     return {
       x: frame.x + OVERVIEW_FRAME_BORDER_WIDTH + chrome.contentInset,
@@ -177,34 +160,17 @@ export function useWindowFrameGeometry({
       };
     }
 
+    const content = getOverviewContentScreenBounds(windowInfo, targetTransform);
     const canvasRect = canvasRef.current?.getBoundingClientRect();
     const canvasOffsetX = canvasRect?.left || 0;
     const canvasOffsetY = canvasRect?.top || 0;
 
     return {
       hwnd: windowInfo.hwnd || '',
-      x: Math.round(canvasOffsetX + frame.x + EMBEDDED_NODE_CONTENT_INSET_X),
-      y: Math.round(canvasOffsetY + frame.y + EMBEDDED_NODE_CONTENT_INSET_TOP),
-      width: Math.max(1, Math.round(frame.width - EMBEDDED_NODE_CHROME_WIDTH)),
-      height: Math.max(1, Math.round(frame.height - EMBEDDED_NODE_CONTENT_INSET_TOP - EMBEDDED_NODE_CONTENT_INSET_BOTTOM))
-    };
-  }
-
-  function getInteractiveEmbedTransform(windowInfo: VirtualWindowState): CanvasTransform {
-    const canvasWidth = canvasRef.current?.clientWidth || window.innerWidth;
-    const canvasHeight = canvasRef.current?.clientHeight || window.innerHeight;
-    const { safeWidth, safeHeight, safeCenterX, safeCenterY } = getSafeCanvasBounds(canvasWidth, canvasHeight, safeArea);
-    const maximumContentWidth = Math.max(1, safeWidth - EMBEDDED_NODE_CHROME_WIDTH);
-    const maximumContentHeight = Math.max(1, safeHeight - EMBEDDED_NODE_CHROME_HEIGHT);
-    const fitScale = Math.min(maximumContentWidth / Math.max(1, windowInfo.width), maximumContentHeight / Math.max(1, windowInfo.height));
-    const scale = clampScale(Math.min(INTERACTIVE_EMBED_SCALE, fitScale));
-    const frameWidth = Math.max(1, windowInfo.width * scale) + EMBEDDED_NODE_CHROME_WIDTH;
-    const frameHeight = Math.max(1, windowInfo.height * scale) + EMBEDDED_NODE_CHROME_HEIGHT;
-
-    return {
-      scale,
-      offsetX: Math.round(safeCenterX - frameWidth / 2 - windowInfo.virtualX * scale),
-      offsetY: Math.round(safeCenterY - frameHeight / 2 - windowInfo.virtualY * scale)
+      x: Math.round(canvasOffsetX + content.x),
+      y: Math.round(canvasOffsetY + content.y),
+      width: Math.max(1, Math.round(content.width)),
+      height: Math.max(1, Math.round(content.height))
     };
   }
 
@@ -217,7 +183,6 @@ export function useWindowFrameGeometry({
     getAspectPreservingOverviewContentSize,
     getFrameScreenBounds,
     getOverviewContentScreenBounds,
-    getEmbeddedContentBounds,
-    getInteractiveEmbedTransform
+    getEmbeddedContentBounds
   };
 }

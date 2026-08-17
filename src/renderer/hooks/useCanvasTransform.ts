@@ -12,6 +12,7 @@ export type UseCanvasTransformParams = {
   zoomInSignal: number;
   zoomOutSignal: number;
   actualSizeSignal: number;
+  locked?: boolean;
   onZoomChange: (scale: number) => void;
 };
 
@@ -24,6 +25,7 @@ export function useCanvasTransform({
   zoomInSignal,
   zoomOutSignal,
   actualSizeSignal,
+  locked = false,
   onZoomChange
 }: UseCanvasTransformParams): {
   transform: CanvasTransform;
@@ -44,6 +46,9 @@ export function useCanvasTransform({
 
   function setTransform(next: CanvasTransform | ((current: CanvasTransform) => CanvasTransform)): void {
     setTransformState((current) => {
+      if (locked) {
+        return current;
+      }
       const resolved = typeof next === 'function' ? next(current) : next;
       return resolved;
     });

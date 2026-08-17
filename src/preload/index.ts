@@ -67,6 +67,11 @@ const api = {
     const listener = (_event: Electron.IpcRendererEvent, hwnd: string): void => callback(hwnd);
     ipcRenderer.on('windows:closed', listener);
     return () => ipcRenderer.removeListener('windows:closed', listener);
+  },
+  onInteractiveShortcut: (callback: (action: 'toggle-embed' | 'scan') => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, action: 'toggle-embed' | 'scan'): void => callback(action);
+    ipcRenderer.on('windows:interactive-shortcut', listener);
+    return () => ipcRenderer.removeListener('windows:interactive-shortcut', listener);
   }
 };
 

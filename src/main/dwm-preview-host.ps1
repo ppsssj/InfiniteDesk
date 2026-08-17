@@ -38,6 +38,7 @@ namespace InfiniteDeskPreview {
   public class PreviewCommand {
     public string action { get; set; }
     public string ownerHwnd { get; set; }
+    public string hwnd { get; set; }
     public List<PreviewItem> previews { get; set; }
     public PointerInputItem input { get; set; }
   }
@@ -1028,6 +1029,27 @@ namespace InfiniteDeskPreview {
     [DllImport("user32.dll")]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
 
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out Point point);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetCursorPos(int x, int y);
+
+    [DllImport("user32.dll")]
+    private static extern bool ClipCursor(ref Rect bounds);
+
+    [DllImport("user32.dll")]
+    private static extern bool ClipCursor(IntPtr bounds);
+
+    [DllImport("user32.dll")]
+    private static extern bool ReleaseCapture();
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int virtualKey);
+
     private IntPtr thumbnail = IntPtr.Zero;
     private IntPtr sourceHwnd = IntPtr.Zero;
     private IntPtr ownerHwnd = IntPtr.Zero;
@@ -1041,7 +1063,17 @@ namespace InfiniteDeskPreview {
     private string pressedButton = "left";
     private double lastNormalizedX;
     private double lastNormalizedY;
+    private readonly System.Windows.Forms.Timer realInputTimer;
+    private readonly SoftwareCursorForm softwareCursor;
+    private bool realInputEnabled;
+    private bool redirectingRealInput;
+    private bool restoreChordDown;
+    private Point savedPhysicalCursor;
+    private Rect realInputTargetBounds;
     private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+    private const int VK_CONTROL = 0x11;
+    private const int VK_MENU = 0x12;
+    private const int VK_F10 = 0x79;
 
     public IntPtr SourceHwnd {
       get { return sourceHwnd; }
@@ -1056,6 +1088,11 @@ namespace InfiniteDeskPreview {
       Opacity = 1.0;
       Width = 1;
       Height = 1;
+      softwareCursor = new SoftwareCursorForm();
+      realInputTimer = new System.Windows.Forms.Timer();
+      realInputTimer.Interval = 16;
+      realInputTimer.Tick += delegate(object sender, EventArgs args) { TickRealInput(); };
+      realInputTimer.Start();
     }
 
     protected override bool ShowWithoutActivation {
@@ -1131,6 +1168,7 @@ namespace InfiniteDeskPreview {
         sourceHwnd = nextSourceHwnd;
         int registerResult = DwmRegisterThumbnail(Handle, sourceHwnd, out thumbnail);
         if (registerResult != 0 || thumbnail == IntPtr.Zero) {
+          Console.Error.WriteLine("[dwm-preview] register failed for " + HwndToString(sourceHwnd) + ": 0x" + registerResult.ToString("X8"));
           UnregisterThumbnail();
           HideWindowOnly();
           return;
@@ -1155,6 +1193,7 @@ namespace InfiniteDeskPreview {
       properties.fSourceClientAreaOnly = false;
       int updateResult = DwmUpdateThumbnailProperties(thumbnail, ref properties);
       if (updateResult != 0) {
+        Console.Error.WriteLine("[dwm-preview] update failed for " + HwndToString(sourceHwnd) + ": 0x" + updateResult.ToString("X8"));
         UnregisterThumbnail();
         HideWindowOnly();
         return;
@@ -1252,7 +1291,114 @@ namespace InfiniteDeskPreview {
       return new Point(Math.Max(0, Math.Min(32, offsetX)), Math.Max(0, Math.Min(32, offsetY)));
     }
 
+    public void SetRealInputEnabled(bool enabled) {
+      realInputEnabled = enabled;
+      if (!enabled) {
+        ExitRealInput();
+      }
+    }
+
+    public void RefreshPreviewRegistration() {
+      if (desiredSourceHwnd == IntPtr.Zero) {
+        return;
+      }
+      UnregisterThumbnail();
+      RetryPendingPreview();
+    }
+
+    private void EnterRealInput(Point previewPoint) {
+      if (!realInputEnabled || redirectingRealInput || sourceHwnd == IntPtr.Zero ||
+          ClientSize.Width <= 1 || ClientSize.Height <= 1) {
+        return;
+      }
+
+      Point currentCursor;
+      Rect targetBounds;
+      if (!GetCursorPos(out currentCursor) ||
+          DwmGetWindowAttribute(sourceHwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out targetBounds, Marshal.SizeOf(typeof(Rect))) != 0 ||
+          targetBounds.right - targetBounds.left <= 1 || targetBounds.bottom - targetBounds.top <= 1) {
+        return;
+      }
+
+      double localX = Math.Max(0.0, Math.Min(1.0, (double)previewPoint.X / Math.Max(1, ClientSize.Width - 1)));
+      double localY = Math.Max(0.0, Math.Min(1.0, (double)previewPoint.Y / Math.Max(1, ClientSize.Height - 1)));
+      double normalizedX = currentSourceCrop.X + localX * currentSourceCrop.Width;
+      double normalizedY = currentSourceCrop.Y + localY * currentSourceCrop.Height;
+      int targetX = targetBounds.left + (int)Math.Round(normalizedX * Math.Max(1, targetBounds.right - targetBounds.left - 1));
+      int targetY = targetBounds.top + (int)Math.Round(normalizedY * Math.Max(1, targetBounds.bottom - targetBounds.top - 1));
+
+      savedPhysicalCursor = currentCursor;
+      realInputTargetBounds = targetBounds;
+      Capture = false;
+      ReleaseCapture();
+      SetForegroundWindow(sourceHwnd);
+      SetCursorPos(targetX, targetY);
+      ClipCursor(ref realInputTargetBounds);
+      redirectingRealInput = true;
+      softwareCursor.ShowInactive();
+      UpdateSoftwareCursor();
+      Console.Out.WriteLine("{\"event\":\"real-input-started\",\"hwnd\":\"" + HwndToString(sourceHwnd) + "\"}");
+      Console.Out.Flush();
+    }
+
+    private void ExitRealInput() {
+      ClipCursor(IntPtr.Zero);
+      if (redirectingRealInput) {
+        SetCursorPos(savedPhysicalCursor.X, savedPhysicalCursor.Y);
+      }
+      redirectingRealInput = false;
+      softwareCursor.Hide();
+    }
+
+    private void TickRealInput() {
+      bool restoreChord = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 &&
+        (GetAsyncKeyState(VK_MENU) & 0x8000) != 0 &&
+        (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
+      if (restoreChord && !restoreChordDown) {
+        ExitRealInput();
+      }
+      restoreChordDown = restoreChord;
+
+      if (!redirectingRealInput) {
+        return;
+      }
+      if (sourceHwnd == IntPtr.Zero || !NativePointerRelay.IsValidWindow(sourceHwnd)) {
+        ExitRealInput();
+        return;
+      }
+
+      Rect latestBounds;
+      if (DwmGetWindowAttribute(sourceHwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out latestBounds, Marshal.SizeOf(typeof(Rect))) == 0 &&
+          latestBounds.right - latestBounds.left > 1 && latestBounds.bottom - latestBounds.top > 1) {
+        realInputTargetBounds = latestBounds;
+        ClipCursor(ref realInputTargetBounds);
+      }
+      UpdateSoftwareCursor();
+    }
+
+    private void UpdateSoftwareCursor() {
+      Point actual;
+      int targetWidth = realInputTargetBounds.right - realInputTargetBounds.left;
+      int targetHeight = realInputTargetBounds.bottom - realInputTargetBounds.top;
+      if (!GetCursorPos(out actual) || targetWidth <= 1 || targetHeight <= 1 ||
+          currentSourceCrop.Width <= 0 || currentSourceCrop.Height <= 0) {
+        return;
+      }
+
+      double sourceX = Math.Max(0.0, Math.Min(1.0, (double)(actual.X - realInputTargetBounds.left) / targetWidth));
+      double sourceY = Math.Max(0.0, Math.Min(1.0, (double)(actual.Y - realInputTargetBounds.top) / targetHeight));
+      double localX = Math.Max(0.0, Math.Min(1.0, (sourceX - currentSourceCrop.X) / currentSourceCrop.Width));
+      double localY = Math.Max(0.0, Math.Min(1.0, (sourceY - currentSourceCrop.Y) / currentSourceCrop.Height));
+      int displayX = Left + (int)Math.Round(localX * Math.Max(1, ClientSize.Width - 1));
+      int displayY = Top + (int)Math.Round(localY * Math.Max(1, ClientSize.Height - 1));
+      softwareCursor.MoveCenter(displayX, displayY);
+    }
+
     protected override void OnMouseDown(MouseEventArgs eventArgs) {
+      if (realInputEnabled) {
+        EnterRealInput(eventArgs.Location);
+        return;
+      }
       NativePointerRelay.KeepControllerAbove(ownerHwnd);
       pressedButton = GetButtonName(eventArgs.Button);
       pointerIsDown = true;
@@ -1261,10 +1407,18 @@ namespace InfiniteDeskPreview {
     }
 
     protected override void OnMouseMove(MouseEventArgs eventArgs) {
+      if (redirectingRealInput) {
+        return;
+      }
       RelayMouse(eventArgs, "move", pointerIsDown ? pressedButton : GetButtonName(eventArgs.Button));
     }
 
     protected override void OnMouseUp(MouseEventArgs eventArgs) {
+      if (realInputEnabled) {
+        pointerIsDown = false;
+        Capture = false;
+        return;
+      }
       RelayMouse(eventArgs, "up", GetButtonName(eventArgs.Button));
       pointerIsDown = false;
       Capture = false;
@@ -1273,6 +1427,10 @@ namespace InfiniteDeskPreview {
     }
 
     protected override void OnMouseWheel(MouseEventArgs eventArgs) {
+      if (realInputEnabled) {
+        EnterRealInput(eventArgs.Location);
+        return;
+      }
       NativePointerRelay.KeepControllerAbove(ownerHwnd);
       RelayMouse(eventArgs, "wheel", "left");
     }
@@ -1288,6 +1446,10 @@ namespace InfiniteDeskPreview {
     ) {
       Point clientPoint = PointToClient(new Point(screenX, screenY));
       if (clientPoint.X < 0 || clientPoint.Y < 0 || clientPoint.X >= ClientSize.Width || clientPoint.Y >= ClientSize.Height) {
+        return;
+      }
+      if (realInputEnabled) {
+        EnterRealInput(clientPoint);
         return;
       }
       NativePointerRelay.KeepControllerAbove(ownerHwnd);
@@ -1313,6 +1475,10 @@ namespace InfiniteDeskPreview {
 
     protected override void OnMouseCaptureChanged(EventArgs eventArgs) {
       base.OnMouseCaptureChanged(eventArgs);
+      if (realInputEnabled) {
+        pointerIsDown = false;
+        return;
+      }
       if (!pointerIsDown || Capture) {
         return;
       }
@@ -1372,6 +1538,7 @@ namespace InfiniteDeskPreview {
     }
 
     public void HidePreview() {
+      ExitRealInput();
       desiredSourceHwnd = IntPtr.Zero;
       HideWindowOnly();
     }
@@ -1388,6 +1555,10 @@ namespace InfiniteDeskPreview {
     }
 
     protected override void Dispose(bool disposing) {
+      ExitRealInput();
+      realInputTimer.Stop();
+      realInputTimer.Dispose();
+      softwareCursor.Dispose();
       UnregisterThumbnail();
       base.Dispose(disposing);
     }
@@ -1401,10 +1572,58 @@ namespace InfiniteDeskPreview {
     }
   }
 
+  public sealed class SoftwareCursorForm : Form {
+    public SoftwareCursorForm() {
+      FormBorderStyle = FormBorderStyle.None;
+      ShowInTaskbar = false;
+      TopMost = true;
+      BackColor = Color.Magenta;
+      TransparencyKey = Color.Magenta;
+      Size = new Size(22, 22);
+    }
+
+    protected override bool ShowWithoutActivation {
+      get { return true; }
+    }
+
+    protected override CreateParams CreateParams {
+      get {
+        const int WS_EX_TRANSPARENT = 0x20;
+        const int WS_EX_TOOLWINDOW = 0x80;
+        const int WS_EX_NOACTIVATE = 0x08000000;
+        CreateParams value = base.CreateParams;
+        value.ExStyle |= WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+        return value;
+      }
+    }
+
+    protected override void OnPaint(PaintEventArgs eventArgs) {
+      eventArgs.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+      using (Brush fill = new SolidBrush(Color.FromArgb(245, 158, 11)))
+      using (Pen outline = new Pen(Color.White, 2.0f)) {
+        eventArgs.Graphics.FillEllipse(fill, 3, 3, 14, 14);
+        eventArgs.Graphics.DrawEllipse(outline, 3, 3, 14, 14);
+        eventArgs.Graphics.DrawLine(outline, 10, 0, 10, 20);
+        eventArgs.Graphics.DrawLine(outline, 0, 10, 20, 10);
+      }
+    }
+
+    public void ShowInactive() {
+      if (!Visible) {
+        Show();
+      }
+    }
+
+    public void MoveCenter(int x, int y) {
+      Location = new Point(x - Width / 2, y - Height / 2);
+    }
+  }
+
   public sealed class PreviewContext : ApplicationContext {
     private readonly Control invoker = new Control();
     private readonly Dictionary<string, PreviewForm> forms = new Dictionary<string, PreviewForm>();
     private readonly HashSet<long> reportedClosedSources = new HashSet<long>();
+    private readonly HashSet<long> realInputSources = new HashSet<long>();
     private readonly System.Windows.Forms.Timer windowWatchTimer = new System.Windows.Forms.Timer();
     private readonly object pendingSyncLock = new object();
     private PreviewCommand pendingSyncCommand;
@@ -1479,6 +1698,28 @@ namespace InfiniteDeskPreview {
         return;
       }
 
+      if (action == "enable-real-input" || action == "disable-real-input") {
+        IntPtr source = ParseHwnd(command.hwnd);
+        if (source == IntPtr.Zero) {
+          return;
+        }
+        bool enabled = action == "enable-real-input";
+        if (enabled) {
+          realInputSources.Add(source.ToInt64());
+        } else {
+          realInputSources.Remove(source.ToInt64());
+        }
+        foreach (PreviewForm form in forms.Values) {
+          if (!form.IsDisposed && form.SourceHwnd == source) {
+            form.SetRealInputEnabled(enabled);
+            if (enabled) {
+              form.RefreshPreviewRegistration();
+            }
+          }
+        }
+        return;
+      }
+
       if (action != "sync") {
         return;
       }
@@ -1506,6 +1747,7 @@ namespace InfiniteDeskPreview {
           }
 
           IntPtr sourceHwnd = ParseHwnd(item.hwnd);
+          form.SetRealInputEnabled(realInputSources.Contains(sourceHwnd.ToInt64()));
           byte opacity = item.opacity <= 0 ? (byte)255 : (byte)Math.Min(255, item.opacity);
           RectangleF sourceCrop = new RectangleF((float)item.cropX, (float)item.cropY, (float)item.cropWidth, (float)item.cropHeight);
           form.UpdatePreview(sourceHwnd, new Rectangle(item.x, item.y, item.width, item.height), sourceCrop, opacity, ownerIsTopmost);
@@ -1556,6 +1798,7 @@ namespace InfiniteDeskPreview {
           Console.Out.Flush();
         }
         NativePointerRelay.ForgetSource(source);
+        realInputSources.Remove(sourceValue);
         form.RemoveClosedSource();
       }
     }
@@ -1570,6 +1813,7 @@ namespace InfiniteDeskPreview {
       }
       if (dispose) {
         forms.Clear();
+        realInputSources.Clear();
       }
     }
 

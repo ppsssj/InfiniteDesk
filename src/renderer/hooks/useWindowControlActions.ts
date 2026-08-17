@@ -18,7 +18,7 @@ export function useWindowControlActions(deps: WindowControlActionsDeps): {
   embedRealWindow: (windowInfo: VirtualWindowState, bounds: MoveEmbeddedWindowParams) => Promise<void>;
   relayPointerInput: (input: RelayPointerInput) => Promise<void>;
   detachRealWindow: (hwnd: string) => Promise<void>;
-  detachAllInteractiveWindows: () => Promise<void>;
+  detachAllInteractiveWindows: () => Promise<boolean>;
   moveEmbeddedWindow: (params: MoveEmbeddedWindowParams) => Promise<void>;
   syncDwmPreviews: (previews: DwmPreviewWindow[]) => Promise<void>;
   clearDwmPreviews: () => Promise<void>;
@@ -85,7 +85,7 @@ export function useWindowControlActions(deps: WindowControlActionsDeps): {
       }
 
       setEmbeddedWindowIds((current) => (current.includes(windowInfo.hwnd!) ? current : [...current, windowInfo.hwnd!]));
-      setMessage(`Interactive control attached "${windowInfo.title}" inside its process node.`);
+      setMessage(`Live input ready for "${windowInfo.title}". Click its preview to enter; Ctrl+Alt+F10 returns the cursor.`);
     } catch (embedError) {
       setError((embedError as Error).message);
     }
@@ -112,16 +112,16 @@ export function useWindowControlActions(deps: WindowControlActionsDeps): {
       }
 
       setEmbeddedWindowIds((current) => current.filter((item) => item !== hwnd));
-      setMessage('Detached interactive window.');
+      setMessage('Live input detached and the real window was restored.');
     } catch (detachError) {
       setError((detachError as Error).message);
     }
   }
 
-  async function detachAllInteractiveWindows(): Promise<void> {
+  async function detachAllInteractiveWindows(): Promise<boolean> {
     if (embeddedWindowIds.length === 0) {
       setMessage('No interactive windows are attached.');
-      return;
+      return true;
     }
 
     setError(null);
@@ -144,11 +144,12 @@ export function useWindowControlActions(deps: WindowControlActionsDeps): {
       const failedSet = new Set(failedHwnds);
       setEmbeddedWindowIds((current) => current.filter((hwnd) => failedSet.has(hwnd)));
       setError(`Could not detach ${failedHwnds.length} interactive windows. ${failedMessages.join(' ')}`);
-      return;
+      return false;
     }
 
     setEmbeddedWindowIds([]);
     setMessage('Detached all interactive windows.');
+    return true;
   }
 
   async function moveEmbeddedWindow(params: MoveEmbeddedWindowParams): Promise<void> {

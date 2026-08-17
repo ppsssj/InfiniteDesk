@@ -48,6 +48,15 @@ public class WinApi {
   [DllImport("user32.dll")]
   public static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT placement);
 
+  [DllImport("user32.dll", SetLastError = true)]
+  public static extern bool SetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT placement);
+
+  [DllImport("user32.dll")]
+  public static extern IntPtr MonitorFromWindow(IntPtr hWnd, uint dwFlags);
+
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  public static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO monitorInfo);
+
   [DllImport("user32.dll")]
   public static extern int GetSystemMetrics(int nIndex);
 
@@ -139,6 +148,14 @@ public class WinApi {
     public POINT ptMaxPosition;
     public RECT rcNormalPosition;
   }
+
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  public struct MONITORINFO {
+    public int cbSize;
+    public RECT rcMonitor;
+    public RECT rcWork;
+    public uint dwFlags;
+  }
 }
 "@
 
@@ -203,6 +220,188 @@ function Get-RestoreWindowRect {
   }
 
   return $rect
+}
+
+function Get-MonitorBoundsForWindow {
+  param([IntPtr]$Handle)
+
+  $MONITOR_DEFAULTTONEAREST = 2
+  $monitor = [WinApi]::MonitorFromWindow($Handle, $MONITOR_DEFAULTTONEAREST)
+  if ($monitor -eq [IntPtr]::Zero) {
+    return $null
+  }
+
+  $monitorInfo = New-Object WinApi+MONITORINFO
+  $monitorInfo.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf([type][WinApi+MONITORINFO])
+  if (-not [WinApi]::GetMonitorInfo($monitor, [ref]$monitorInfo)) {
+    return $null
+  }
+
+  return $monitorInfo.rcMonitor
+}
+
+function Convert-WindowPlacementToResult {
+  param([WinApi+WINDOWPLACEMENT]$Placement)
+
+  return [pscustomobject]@{
+    flags = $Placement.flags
+    showCmd = $Placement.showCmd
+    minX = $Placement.ptMinPosition.X
+    minY = $Placement.ptMinPosition.Y
+    maxX = $Placement.ptMaxPosition.X
+    maxY = $Placement.ptMaxPosition.Y
+    normalLeft = $Placement.rcNormalPosition.Left
+    normalTop = $Placement.rcNormalPosition.Top
+    normalRight = $Placement.rcNormalPosition.Right
+    normalBottom = $Placement.rcNormalPosition.Bottom
+  }
+}
+
+function New-WindowPlacementFromResult {
+  param($Placement)
+
+  $result = New-Object WinApi+WINDOWPLACEMENT
+  $result.length = [System.Runtime.InteropServices.Marshal]::SizeOf([type][WinApi+WINDOWPLACEMENT])
+  $result.flags = [int]$Placement.flags
+  $result.showCmd = [int]$Placement.showCmd
+
+  $minPosition = New-Object WinApi+POINT
+  $minPosition.X = [int]$Placement.minX
+  $minPosition.Y = [int]$Placement.minY
+  $result.ptMinPosition = $minPosition
+
+  $maxPosition = New-Object WinApi+POINT
+  $maxPosition.X = [int]$Placement.maxX
+  $maxPosition.Y = [int]$Placement.maxY
+  $result.ptMaxPosition = $maxPosition
+
+  $normalPosition = New-Object WinApi+RECT
+  $normalPosition.Left = [int]$Placement.normalLeft
+  $normalPosition.Top = [int]$Placement.normalTop
+  $normalPosition.Right = [int]$Placement.normalRight
+  $normalPosition.Bottom = [int]$Placement.normalBottom
+  $result.rcNormalPosition = $normalPosition
+  return $result
+}
+
+function Move-WindowToVirtualDisplay {
+  param(
+    [string]$TargetHwnd,
+    [int]$DisplayX,
+    [int]$DisplayY,
+    [int]$DisplayWidth,
+    [int]$DisplayHeight
+  )
+
+  if ([string]::IsNullOrWhiteSpace($TargetHwnd)) {
+    return [pscustomobject]@{ success = $false; hwnd = ""; error = "No HWND was provided." }
+  }
+  if ($DisplayWidth -le 0 -or $DisplayHeight -le 0) {
+    return [pscustomobject]@{ success = $false; hwnd = $TargetHwnd; error = "The virtual display bounds are invalid." }
+  }
+
+  $handle = Convert-StringToHwnd $TargetHwnd
+  if (-not [WinApi]::IsWindow($handle)) {
+    return [pscustomobject]@{ success = $false; hwnd = $TargetHwnd; error = "Window handle is no longer valid." }
+  }
+  if (Test-IsInfiniteDeskWindow $handle) {
+    return [pscustomobject]@{ success = $false; hwnd = $TargetHwnd; error = "InfiniteDesk internal window cannot be moved." }
+  }
+
+  $original = New-Object WinApi+WINDOWPLACEMENT
+  $original.length = [System.Runtime.InteropServices.Marshal]::SizeOf([type][WinApi+WINDOWPLACEMENT])
+  if (-not [WinApi]::GetWindowPlacement($handle, [ref]$original)) {
+    return [pscustomobject]@{ success = $false; hwnd = $TargetHwnd; error = "Could not read the original window placement." }
+  }
+
+  $sourceMonitor = Get-MonitorBoundsForWindow $handle
+  if ($null -eq $sourceMonitor) {
+    return [pscustomobject]@{ success = $false; hwnd = $TargetHwnd; error = "Could not resolve the source monitor." }
+  }
+
+  $normalWidth = $original.rcNormalPosition.Right - $original.rcNormalPosition.Left
+  $normalHeight = $original.rcNormalPosition.Bottom - $original.rcNormalPosition.Top
+  if ($normalWidth -le 0 -or $normalHeight -le 0) {
+    return [pscustomobject]@{ success = $false; hwnd = $TargetHwnd; error = "The original restore bounds are invalid." }
+  }
+
+  $relativeX = $original.rcNormalPosition.Left - $sourceMonitor.Left
+  $relativeY = $original.rcNormalPosition.Top - $sourceMonitor.Top
+  $targetNormal = New-Object WinApi+RECT
+  $targetNormal.Left = $DisplayX + $relativeX
+  $targetNormal.Top = $DisplayY + $relativeY
+  $targetNormal.Right = $targetNormal.Left + $normalWidth
+  $targetNormal.Bottom = $targetNormal.Top + $normalHeight
+
+  $targetPlacement = New-Object WinApi+WINDOWPLACEMENT
+  $targetPlacement.length = [System.Runtime.InteropServices.Marshal]::SizeOf([type][WinApi+WINDOWPLACEMENT])
+  $targetPlacement.flags = 0
+  $targetPlacement.showCmd = 1
+  $targetPlacement.ptMinPosition = $original.ptMinPosition
+  $targetPlacement.ptMaxPosition = $original.ptMaxPosition
+  $targetPlacement.rcNormalPosition = $targetNormal
+
+  [void][WinApi]::ShowWindow($handle, 9)
+  if (-not [WinApi]::SetWindowPlacement($handle, [ref]$targetPlacement)) {
+    return [pscustomobject]@{ success = $false; hwnd = $TargetHwnd; error = "Could not place the window on the virtual display." }
+  }
+
+  if ($original.showCmd -eq 3) {
+    [void][WinApi]::ShowWindow($handle, 3)
+  } elseif ($original.showCmd -eq 2) {
+    [void][WinApi]::ShowWindow($handle, 6)
+  } else {
+    [void][WinApi]::ShowWindow($handle, 1)
+  }
+
+  return [pscustomobject]@{
+    success = $true
+    hwnd = $TargetHwnd
+    originalPlacement = Convert-WindowPlacementToResult $original
+    virtualDisplay = [pscustomobject]@{
+      x = $DisplayX
+      y = $DisplayY
+      width = $DisplayWidth
+      height = $DisplayHeight
+    }
+    error = $null
+  }
+}
+
+function Restore-WindowFromVirtualDisplay {
+  param(
+    [string]$TargetHwnd,
+    $OriginalPlacement
+  )
+
+  if ([string]::IsNullOrWhiteSpace($TargetHwnd) -or $null -eq $OriginalPlacement) {
+    return [pscustomobject]@{ success = $false; hwnd = $TargetHwnd; error = "The original window placement is unavailable." }
+  }
+
+  $handle = Convert-StringToHwnd $TargetHwnd
+  if (-not [WinApi]::IsWindow($handle)) {
+    return [pscustomobject]@{ success = $true; hwnd = $TargetHwnd; error = $null }
+  }
+
+  $placement = New-WindowPlacementFromResult $OriginalPlacement
+  $originalShowCommand = $placement.showCmd
+  $placement.showCmd = 1
+  $placement.flags = 0
+
+  [void][WinApi]::ShowWindow($handle, 9)
+  if (-not [WinApi]::SetWindowPlacement($handle, [ref]$placement)) {
+    return [pscustomobject]@{ success = $false; hwnd = $TargetHwnd; error = "Could not restore the original window placement." }
+  }
+
+  if ($originalShowCommand -eq 3) {
+    [void][WinApi]::ShowWindow($handle, 3)
+  } elseif ($originalShowCommand -eq 2) {
+    [void][WinApi]::ShowWindow($handle, 6)
+  } else {
+    [void][WinApi]::ShowWindow($handle, 1)
+  }
+
+  return [pscustomobject]@{ success = $true; hwnd = $TargetHwnd; error = $null }
 }
 
 function Get-VirtualScreenRect {
@@ -827,6 +1026,8 @@ function Invoke-Dispatch {
     "embed" { return Embed-Window $Message.params.hwnd $Message.params.hostHwnd $Message.params.x $Message.params.y $Message.params.width $Message.params.height }
     "detach" { return Detach-EmbeddedWindow $Message.params.hwnd $Message.params.originalParentHwnd $Message.params.originalStyle $Message.params.originalExStyle $Message.params.originalX $Message.params.originalY $Message.params.originalWidth $Message.params.originalHeight }
     "moveEmbedded" { return Move-EmbeddedWindow $Message.params.hwnd $Message.params.x $Message.params.y $Message.params.width $Message.params.height }
+    "virtualAttach" { return Move-WindowToVirtualDisplay $Message.params.hwnd $Message.params.displayX $Message.params.displayY $Message.params.displayWidth $Message.params.displayHeight }
+    "virtualDetach" { return Restore-WindowFromVirtualDisplay $Message.params.hwnd $Message.params.originalPlacement }
     default { throw "Unsupported action: $($Message.action)" }
   }
 }

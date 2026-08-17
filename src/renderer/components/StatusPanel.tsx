@@ -53,7 +53,8 @@ export function StatusPanel({
         <strong>Workflow</strong>
         <span>Native Overlay makes InfiniteDesk a translucent layer above real windows.</span>
         <span>Mirror Control relays clicks, drags, right-clicks, scrolling, and focus while live views remain inside InfiniteDesk.</span>
-        <span>For Chrome/Figma canvas work or a gray browser preview, attach the real window with the pointer button or Ctrl+E.</span>
+        <span>Ctrl+E moves the selected app to the InfiniteDesk virtual display without resizing it. Click the preview to enter live input.</span>
+        <span>Ctrl+Alt+F10 returns the real cursor to InfiniteDesk without detaching the app.</span>
         <span>Drag window cards on the canvas, then apply the layout to the real windows.</span>
         <span>Click a live preview, then type normally; keyboard input follows the focused original app.</span>
         <span>Use window frame controls to focus, minimize, maximize, restore, or close real windows.</span>
@@ -73,7 +74,7 @@ export function StatusPanel({
         <span>Delete / Backspace - Remove selected windows from canvas</span>
         <span>Enter - Focus selected real window</span>
         <span>Ctrl+Enter - Zoom to selected window</span>
-        <span>Ctrl+E - Attach or detach interactive control</span>
+        <span>Ctrl+E - Attach or detach virtual-display input</span>
         <span>Alt+Arrow - Move selected windows 10px</span>
         <span>Alt+Shift+Arrow - Move selected windows 50px</span>
         <span>Ctrl+Shift+O - Toggle Native Overlay</span>

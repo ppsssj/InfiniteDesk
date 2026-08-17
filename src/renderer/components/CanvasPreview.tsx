@@ -95,6 +95,7 @@ export function CanvasPreview({
     [canvasWindowEntries]
   );
   const shouldSuspendNativePreviews = false;
+  const isInteractiveCameraLocked = embeddedWindowIds.length > 0;
 
   const viewportVersion = useViewportVersion(canvasRef);
 
@@ -107,6 +108,7 @@ export function CanvasPreview({
     zoomInSignal,
     zoomOutSignal,
     actualSizeSignal,
+    locked: isInteractiveCameraLocked,
     onZoomChange
   });
 
@@ -118,11 +120,9 @@ export function CanvasPreview({
     getVisiblePreviewRects,
     getFrameScreenBounds,
     getOverviewContentScreenBounds,
-    getEmbeddedContentBounds,
-    getInteractiveEmbedTransform
+    getEmbeddedContentBounds
   } = useWindowFrameGeometry({
     canvasRef,
-    safeArea,
     transform,
     embeddedWindowIdSet,
     shouldSuspendNativePreviews
@@ -168,6 +168,9 @@ export function CanvasPreview({
 
   function animateCameraTo(targetTransform: CanvasTransform): void {
     cancelCameraAnimation();
+    if (isInteractiveCameraLocked) {
+      return;
+    }
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
       transformRef.current = targetTransform;
       setTransform(targetTransform);
@@ -206,7 +209,7 @@ export function CanvasPreview({
   }, [shouldSuspendNativePreviews]);
 
   function getDwmPreviewWindows(windowInfo: VirtualWindowState): DwmPreviewWindow[] {
-    if (!windowInfo.hwnd || shouldShowNativeEmbeddedWindow(windowInfo)) {
+    if (!windowInfo.hwnd) {
       return [];
     }
 
@@ -422,6 +425,9 @@ export function CanvasPreview({
 
       if (isPrimaryShortcut(event) && event.key.toLowerCase() === 'e') {
         event.preventDefault();
+        if (event.repeat) {
+          return;
+        }
         if (isEmbeddedWindow(primarySelection)) {
           detachEmbeddedWindow(primarySelection);
         } else {
@@ -521,7 +527,7 @@ export function CanvasPreview({
       };
       setSelectionRect({ x: worldPoint.x, y: worldPoint.y, width: 0, height: 0 });
       setDragMode('select-windows');
-    } else {
+    } else if (!isInteractiveCameraLocked) {
       onSelectWindowKeys([]);
       startPanDrag(event, event.currentTarget);
     }
@@ -666,6 +672,9 @@ export function CanvasPreview({
   function handleWheel(event: React.WheelEvent<HTMLDivElement>): void {
     cancelCameraAnimation();
     event.preventDefault();
+    if (isInteractiveCameraLocked) {
+      return;
+    }
     if (event.shiftKey) {
       setTransform((current) => ({
         ...current,
@@ -765,9 +774,7 @@ export function CanvasPreview({
     }
 
     cancelCameraAnimation();
-    const interactiveTransform = getInteractiveEmbedTransform(windowInfo);
-    setTransform(interactiveTransform);
-    onEmbedWindow(windowInfo, getEmbeddedContentBounds(windowInfo, true, interactiveTransform));
+    onEmbedWindow(windowInfo, getEmbeddedContentBounds(windowInfo, true, transformRef.current));
   }
 
   function detachEmbeddedWindow(windowInfo: VirtualWindowState): void {
@@ -866,7 +873,7 @@ export function CanvasPreview({
             const isSelected = selectedWindowKeySet.has(key);
             return (
               <article
-                className={`virtual-window ${!isEmbedded ? 'overview-window' : ''} ${isCompactOverview ? 'compact-overview-window' : ''} ${windowInfo.isHelper ? 'helper-window' : ''} ${windowInfo.isDirty ? 'dirty-window' : ''} ${
+                className={`virtual-window overview-window ${isCompactOverview ? 'compact-overview-window' : ''} ${windowInfo.isHelper ? 'helper-window' : ''} ${windowInfo.isDirty ? 'dirty-window' : ''} ${
                   isEmbedded ? 'embedded-window' : ''
                 } ${isEmbedded && !isNativeEmbeddedVisible ? 'embedded-overview-window' : ''} ${hasActivity ? 'activity-window' : ''} ${isSelected ? 'selected-window' : ''}`}
                 key={key}

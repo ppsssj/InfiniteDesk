@@ -331,6 +331,7 @@ function App(): React.JSX.Element {
     embedRealWindow,
     relayPointerInput,
     detachRealWindow,
+    detachAllInteractiveWindows,
     moveEmbeddedWindow,
     syncDwmPreviews,
     clearDwmPreviews,
@@ -497,6 +498,12 @@ function App(): React.JSX.Element {
     setIsScanning(true);
     setError(null);
     try {
+      if (embeddedWindowIds.length > 0) {
+        const detached = await detachAllInteractiveWindows();
+        if (!detached) {
+          return;
+        }
+      }
       const detected = await window.infiniteDesk.scanWindows();
       const layout = createInitialVirtualLayout(detected);
       setWindows(detected);
@@ -927,6 +934,30 @@ function App(): React.JSX.Element {
 
     return () => window.clearInterval(intervalId);
   }, [isScanning, previewWorkspace]);
+
+  useEffect(() => {
+    const unsubscribeShortcut = window.infiniteDesk.onInteractiveShortcut((action) => {
+      if (action === 'scan') {
+        void scanWindows();
+        return;
+      }
+
+      const embeddedSet = new Set(embeddedWindowIds.map((hwnd) => hwnd.toLowerCase()));
+      const selectedSet = new Set(selectedWindowKeys);
+      const selectedEmbeddedHwnd = virtualWindows.find(
+        (windowInfo, index) =>
+          Boolean(windowInfo.hwnd) &&
+          embeddedSet.has(windowInfo.hwnd!.toLowerCase()) &&
+          selectedSet.has(getWindowKey(windowInfo, index))
+      )?.hwnd;
+      const targetHwnd = selectedEmbeddedHwnd || embeddedWindowIds.at(-1);
+      if (targetHwnd) {
+        void detachRealWindow(targetHwnd);
+      }
+    });
+
+    return unsubscribeShortcut;
+  }, [embeddedWindowIds, selectedWindowKeys, virtualWindows]);
 
   useEffect(() => {
     function handleShortcuts(event: KeyboardEvent): void {
