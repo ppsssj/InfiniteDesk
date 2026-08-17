@@ -51,6 +51,10 @@ namespace InfiniteDeskPreview {
     public int buttons { get; set; }
     public int clickCount { get; set; }
     public int wheelDelta { get; set; }
+    public int wheelDeltaX { get; set; }
+    public bool shiftKey { get; set; }
+    public bool ctrlKey { get; set; }
+    public bool altKey { get; set; }
     public string controllerHwnd { get; set; }
   }
 
@@ -96,8 +100,11 @@ namespace InfiniteDeskPreview {
     private const uint WM_MBUTTONUP = 0x0208;
     private const uint WM_MBUTTONDBLCLK = 0x0209;
     private const uint WM_MOUSEWHEEL = 0x020A;
+    private const uint WM_MOUSEHWHEEL = 0x020E;
     private const int MK_LBUTTON = 0x0001;
     private const int MK_RBUTTON = 0x0002;
+    private const int MK_SHIFT = 0x0004;
+    private const int MK_CONTROL = 0x0008;
     private const int MK_MBUTTON = 0x0010;
     private const byte VK_CONTROL = 0x11;
     private const byte VK_UP = 0x26;
@@ -270,12 +277,26 @@ namespace InfiniteDeskPreview {
       }
 
       if (phase == "wheel") {
-        if (TryRelayAccessibleWheel(source, screenPoint, input.wheelDelta)) {
+        bool chromiumWindow = IsChromiumWindow(source);
+        bool hasHorizontalWheel = input.wheelDeltaX != 0;
+        bool hasModifiers = input.shiftKey || input.ctrlKey || input.altKey;
+        if (!chromiumWindow && !hasHorizontalWheel && !hasModifiers &&
+            TryRelayAccessibleWheel(source, screenPoint, input.wheelDelta)) {
           return;
         }
+
         FocusSource(source);
-        int wheelParam = (input.wheelDelta & 0xFFFF) << 16;
-        PostMessage(target, WM_MOUSEWHEEL, new IntPtr(wheelParam), MakePointParam(screenPoint.x, screenPoint.y));
+        IntPtr wheelTarget = chromiumWindow ? source : target;
+        int modifierMask = WheelModifierMask(input);
+        IntPtr wheelPoint = MakePointParam(screenPoint.x, screenPoint.y);
+        if (input.wheelDelta != 0) {
+          int wheelParam = ((input.wheelDelta & 0xFFFF) << 16) | modifierMask;
+          PostMessage(wheelTarget, WM_MOUSEWHEEL, new IntPtr(wheelParam), wheelPoint);
+        }
+        if (input.wheelDeltaX != 0) {
+          int horizontalWheelParam = ((input.wheelDeltaX & 0xFFFF) << 16) | modifierMask;
+          PostMessage(wheelTarget, WM_MOUSEHWHEEL, new IntPtr(horizontalWheelParam), wheelPoint);
+        }
         return;
       }
 
@@ -807,6 +828,13 @@ namespace InfiniteDeskPreview {
       return result;
     }
 
+    private static int WheelModifierMask(PointerInputItem input) {
+      int result = DomButtonsToWin32(input.buttons);
+      if (input.shiftKey) result |= MK_SHIFT;
+      if (input.ctrlKey) result |= MK_CONTROL;
+      return result;
+    }
+
     private static uint DownMessage(string button) {
       string normalized = String.IsNullOrWhiteSpace(button) ? "left" : button.ToLowerInvariant();
       if (normalized == "right") return WM_RBUTTONDOWN;
@@ -852,9 +880,13 @@ namespace InfiniteDeskPreview {
   public sealed class MouseWheelHook : IDisposable {
     private const int WH_MOUSE_LL = 14;
     private const int WM_MOUSEWHEEL = 0x020A;
+    private const int WM_MOUSEHWHEEL = 0x020E;
     private const uint LLMHF_INJECTED = 0x00000001;
+    private const int VK_SHIFT = 0x10;
+    private const int VK_CONTROL = 0x11;
+    private const int VK_MENU = 0x12;
     private delegate IntPtr HookProcedure(int code, IntPtr message, IntPtr data);
-    public delegate bool WheelHandler(int screenX, int screenY, int delta);
+    public delegate bool WheelHandler(int screenX, int screenY, int delta, bool horizontal, bool shiftKey, bool ctrlKey, bool altKey);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct HookPoint {
@@ -883,6 +915,9 @@ namespace InfiniteDeskPreview {
     [DllImport("kernel32.dll")]
     private static extern IntPtr GetModuleHandle(string moduleName);
 
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int virtualKey);
+
     private readonly HookProcedure callback;
     private readonly WheelHandler handler;
     private IntPtr hook;
@@ -894,13 +929,17 @@ namespace InfiniteDeskPreview {
     }
 
     private IntPtr HandleHook(int code, IntPtr message, IntPtr data) {
-      if (code >= 0 && message.ToInt32() == WM_MOUSEWHEEL) {
+      int messageValue = message.ToInt32();
+      if (code >= 0 && (messageValue == WM_MOUSEWHEEL || messageValue == WM_MOUSEHWHEEL)) {
         LowLevelMouseInput input = (LowLevelMouseInput)Marshal.PtrToStructure(data, typeof(LowLevelMouseInput));
         if ((input.flags & LLMHF_INJECTED) != 0) {
           return CallNextHookEx(hook, code, message, data);
         }
         int delta = (short)((input.mouseData >> 16) & 0xFFFF);
-        if (delta != 0 && handler(input.point.x, input.point.y, delta)) {
+        bool shiftKey = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+        bool ctrlKey = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+        bool altKey = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+        if (delta != 0 && handler(input.point.x, input.point.y, delta, messageValue == WM_MOUSEHWHEEL, shiftKey, ctrlKey, altKey)) {
           return new IntPtr(1);
         }
       }
@@ -1238,13 +1277,38 @@ namespace InfiniteDeskPreview {
       RelayMouse(eventArgs, "wheel", "left");
     }
 
-    public void RelayWheelAtScreenPoint(int screenX, int screenY, int delta) {
+    public void RelayWheelAtScreenPoint(
+      int screenX,
+      int screenY,
+      int delta,
+      bool horizontal,
+      bool shiftKey,
+      bool ctrlKey,
+      bool altKey
+    ) {
       Point clientPoint = PointToClient(new Point(screenX, screenY));
       if (clientPoint.X < 0 || clientPoint.Y < 0 || clientPoint.X >= ClientSize.Width || clientPoint.Y >= ClientSize.Height) {
         return;
       }
       NativePointerRelay.KeepControllerAbove(ownerHwnd);
-      RelayMouse(new MouseEventArgs(MouseButtons.None, 0, clientPoint.X, clientPoint.Y, delta), "wheel", "left");
+      double localX = Math.Max(0.0, Math.Min(1.0, (double)clientPoint.X / Math.Max(1, ClientSize.Width - 1)));
+      double localY = Math.Max(0.0, Math.Min(1.0, (double)clientPoint.Y / Math.Max(1, ClientSize.Height - 1)));
+      lastNormalizedX = currentSourceCrop.X + localX * currentSourceCrop.Width;
+      lastNormalizedY = currentSourceCrop.Y + localY * currentSourceCrop.Height;
+      NativePointerRelay.Relay(new PointerInputItem {
+        hwnd = HwndToString(sourceHwnd),
+        normalizedX = lastNormalizedX,
+        normalizedY = lastNormalizedY,
+        phase = "wheel",
+        button = "left",
+        buttons = 0,
+        wheelDelta = horizontal ? 0 : delta,
+        wheelDeltaX = horizontal ? delta : 0,
+        shiftKey = shiftKey,
+        ctrlKey = ctrlKey,
+        altKey = altKey,
+        controllerHwnd = HwndToString(ownerHwnd)
+      });
     }
 
     protected override void OnMouseCaptureChanged(EventArgs eventArgs) {
@@ -1281,6 +1345,10 @@ namespace InfiniteDeskPreview {
         buttons = GetButtons(eventArgs.Button),
         clickCount = Math.Max(1, eventArgs.Clicks),
         wheelDelta = eventArgs.Delta,
+        wheelDeltaX = 0,
+        shiftKey = (Control.ModifierKeys & Keys.Shift) == Keys.Shift,
+        ctrlKey = (Control.ModifierKeys & Keys.Control) == Keys.Control,
+        altKey = (Control.ModifierKeys & Keys.Alt) == Keys.Alt,
         controllerHwnd = HwndToString(ownerHwnd)
       });
     }
@@ -1455,12 +1523,12 @@ namespace InfiniteDeskPreview {
       }
     }
 
-    private bool TryRelayMouseWheel(int screenX, int screenY, int delta) {
+    private bool TryRelayMouseWheel(int screenX, int screenY, int delta, bool horizontal, bool shiftKey, bool ctrlKey, bool altKey) {
       foreach (PreviewForm form in forms.Values) {
         if (!form.IsDisposed && form.Visible && form.Bounds.Contains(screenX, screenY)) {
           form.BeginInvoke(new Action(delegate() {
             if (!form.IsDisposed) {
-              form.RelayWheelAtScreenPoint(screenX, screenY, delta);
+              form.RelayWheelAtScreenPoint(screenX, screenY, delta, horizontal, shiftKey, ctrlKey, altKey);
             }
           }));
           return true;

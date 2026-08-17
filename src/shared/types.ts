@@ -121,6 +121,10 @@ export type RelayPointerInput = {
   buttons?: number;
   clickCount?: number;
   wheelDelta?: number;
+  wheelDeltaX?: number;
+  shiftKey?: boolean;
+  ctrlKey?: boolean;
+  altKey?: boolean;
 };
 
 export type RelayPointerResult = {

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Focus, Maximize2, Minimize2, RotateCcw, X } from 'lucide-react';
+import { Focus, Maximize2, Minimize2, MousePointer2, RotateCcw, X } from 'lucide-react';
 import { clampScale, easeOutCubic, interpolateCanvasTransform, screenToWorld, worldToScreen, type CanvasTransform } from '../canvas/transform';
 import { updateRegionMembership } from '../canvas/regions';
 import type { DwmPreviewWindow, WindowCommand } from '../../shared/types';
@@ -910,6 +910,12 @@ export function CanvasPreview({
                     {isEmbedded && !isNativeEmbeddedVisible ? <em>Zoom In</em> : null}
                     {windowInfo.hwnd ? (
                       <>
+                        <button
+                          title={isEmbedded ? 'Detach interactive control' : 'Attach interactive control'}
+                          onClick={() => isEmbedded ? detachEmbeddedWindow(windowInfo) : embedWindow(windowInfo)}
+                        >
+                          <MousePointer2 size={11} />
+                        </button>
                         <button title="Focus real window" onClick={() => runWindowCommand(windowInfo, 'focus')}>
                           <Focus size={11} />
                         </button>

@@ -56,7 +56,11 @@ export function useMirrorPointerRelay({
       button: pointerButton,
       buttons: 'buttons' in event ? event.buttons : 0,
       clickCount: action === 'down' && 'detail' in event ? Math.max(1, event.detail) : undefined,
-      wheelDelta: action === 'wheel' && 'deltaY' in event ? Math.round(-event.deltaY) : undefined
+      wheelDelta: action === 'wheel' && 'deltaY' in event ? Math.round(-event.deltaY) : undefined,
+      wheelDeltaX: action === 'wheel' && 'deltaX' in event ? Math.round(event.deltaX) : undefined,
+      shiftKey: event.shiftKey,
+      ctrlKey: event.ctrlKey,
+      altKey: event.altKey
     });
   }
 

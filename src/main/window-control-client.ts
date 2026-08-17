@@ -10,7 +10,7 @@ const windowControlPending = new Map<string, {
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
 }>();
-const WINDOW_CONTROL_COMMAND_TIMEOUT_MS = 6000;
+const WINDOW_CONTROL_COMMAND_TIMEOUT_MS = 15000;
 
 function getWindowControlHostPath(): string {
   if (app.isPackaged) {
@@ -114,8 +114,14 @@ export function sendWindowControlCommand<T>(action: string, params: Record<strin
 
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
-      windowControlPending.delete(id);
+      if (!windowControlPending.delete(id)) {
+        return;
+      }
       reject(new Error(`Window control command '${action}' timed out after ${WINDOW_CONTROL_COMMAND_TIMEOUT_MS}ms.`));
+      if (windowControlHost === child) {
+        windowControlHost = null;
+        child.kill();
+      }
     }, WINDOW_CONTROL_COMMAND_TIMEOUT_MS);
 
     windowControlPending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });

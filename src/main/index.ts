@@ -329,6 +329,10 @@ handleTrusted('window:relay-pointer', async (event, input: RelayPointerInput): P
       buttons: Math.max(0, Math.round(input.buttons || 0)),
       clickCount: Math.max(1, Math.min(2, Math.round(input.clickCount || 1))),
       wheelDelta: Math.round(input.wheelDelta || 0),
+      wheelDeltaX: Math.round(input.wheelDeltaX || 0),
+      shiftKey: Boolean(input.shiftKey),
+      ctrlKey: Boolean(input.ctrlKey),
+      altKey: Boolean(input.altKey),
       controllerHwnd: nativeWindowHandleToString(controllerWindow.getNativeWindowHandle())
     }
   });

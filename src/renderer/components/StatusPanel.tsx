@@ -53,6 +53,7 @@ export function StatusPanel({
         <strong>Workflow</strong>
         <span>Native Overlay makes InfiniteDesk a translucent layer above real windows.</span>
         <span>Mirror Control relays clicks, drags, right-clicks, scrolling, and focus while live views remain inside InfiniteDesk.</span>
+        <span>For Chrome/Figma canvas work or a gray browser preview, attach the real window with the pointer button or Ctrl+E.</span>
         <span>Drag window cards on the canvas, then apply the layout to the real windows.</span>
         <span>Click a live preview, then type normally; keyboard input follows the focused original app.</span>
         <span>Use window frame controls to focus, minimize, maximize, restore, or close real windows.</span>
