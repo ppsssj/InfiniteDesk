@@ -1,0 +1,45 @@
+
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 16
+VisualStudioVersion = 16.0.29728.190
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "InfiniteDeskVirtualDisplayDriver", "InfiniteDeskVirtualDisplayDriver\InfiniteDeskVirtualDisplayDriver.vcxproj", "{DCAA3B9C-530F-422B-93DA-E46F7A7F1DAF}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "InfiniteDeskVirtualDisplayHost", "InfiniteDeskVirtualDisplayHost\InfiniteDeskVirtualDisplayHost.vcxproj", "{DEFFC120-A568-43D7-9BFE-E09EC57266F4}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|ARM64 = Debug|ARM64
+		Debug|x64 = Debug|x64
+		Release|ARM64 = Release|ARM64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{DCAA3B9C-530F-422B-93DA-E46F7A7F1DAF}.Debug|ARM64.ActiveCfg = Debug|ARM64
+		{DCAA3B9C-530F-422B-93DA-E46F7A7F1DAF}.Debug|ARM64.Build.0 = Debug|ARM64
+		{DCAA3B9C-530F-422B-93DA-E46F7A7F1DAF}.Debug|ARM64.Deploy.0 = Debug|ARM64
+		{DCAA3B9C-530F-422B-93DA-E46F7A7F1DAF}.Debug|x64.ActiveCfg = Debug|x64
+		{DCAA3B9C-530F-422B-93DA-E46F7A7F1DAF}.Debug|x64.Build.0 = Debug|x64
+		{DCAA3B9C-530F-422B-93DA-E46F7A7F1DAF}.Debug|x64.Deploy.0 = Debug|x64
+		{DCAA3B9C-530F-422B-93DA-E46F7A7F1DAF}.Release|ARM64.ActiveCfg = Release|ARM64
+		{DCAA3B9C-530F-422B-93DA-E46F7A7F1DAF}.Release|ARM64.Build.0 = Release|ARM64
+		{DCAA3B9C-530F-422B-93DA-E46F7A7F1DAF}.Release|ARM64.Deploy.0 = Release|ARM64
+		{DCAA3B9C-530F-422B-93DA-E46F7A7F1DAF}.Release|x64.ActiveCfg = Release|x64
+		{DCAA3B9C-530F-422B-93DA-E46F7A7F1DAF}.Release|x64.Build.0 = Release|x64
+		{DCAA3B9C-530F-422B-93DA-E46F7A7F1DAF}.Release|x64.Deploy.0 = Release|x64
+		{DEFFC120-A568-43D7-9BFE-E09EC57266F4}.Debug|ARM64.ActiveCfg = Debug|ARM64
+		{DEFFC120-A568-43D7-9BFE-E09EC57266F4}.Debug|ARM64.Build.0 = Debug|ARM64
+		{DEFFC120-A568-43D7-9BFE-E09EC57266F4}.Debug|x64.ActiveCfg = Debug|x64
+		{DEFFC120-A568-43D7-9BFE-E09EC57266F4}.Debug|x64.Build.0 = Debug|x64
+		{DEFFC120-A568-43D7-9BFE-E09EC57266F4}.Release|ARM64.ActiveCfg = Release|ARM64
+		{DEFFC120-A568-43D7-9BFE-E09EC57266F4}.Release|ARM64.Build.0 = Release|ARM64
+		{DEFFC120-A568-43D7-9BFE-E09EC57266F4}.Release|x64.ActiveCfg = Release|x64
+		{DEFFC120-A568-43D7-9BFE-E09EC57266F4}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {4ABBB26A-3CD0-4DE9-9FBF-CF1366FB6455}
+	EndGlobalSection
+EndGlobal

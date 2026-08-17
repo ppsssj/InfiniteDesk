@@ -40,6 +40,9 @@ Desktop.ini
 *.bak
 *.old
 infinitedesk-*.png
+scripts/prototypes/.runlogs/
+native/virtual-display/x64/
+native/virtual-display/*/x64/
 
 # Local Electron/user-data experiments
 userData/
