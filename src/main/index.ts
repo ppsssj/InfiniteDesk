@@ -114,7 +114,9 @@ function syncEmbeddedShortcuts(controllerWindow?: BrowserWindow | null): void {
   }
 }
 
-app.disableHardwareAcceleration();
+// Hardware acceleration must stay on: with it disabled, Chromium falls back
+// to software compositing, which fails to paint this window's alpha channel
+// at all (transparent: true renders as fully invisible, even when focused).
 app.enableSandbox();
 app.setAppUserModelId('com.infinitedesk.app');
 
